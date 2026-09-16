@@ -8,8 +8,12 @@ dependencies {
     api platform('io.netty:netty-bom:4.2.17.Final')
     api 'io.netty:netty-buffer'
     api 'io.netty:netty-transport'
-    implementation 'io.netty:netty-codec'
-    testImplementation 'io.netty:netty-codec'
+    // api, not implementation: MpegTsDecoder extends ByteToMessageDecoder, which
+    // lives here, so it is part of this module's public API. Declared as an
+    // implementation detail it lands on a consumer's runtime classpath but not
+    // their compile classpath, and they cannot subclass or even name the decoder.
+    // The showcase hit exactly this within minutes of depending on the module.
+    api 'io.netty:netty-codec'
 }
 
 mavenPublishing {
