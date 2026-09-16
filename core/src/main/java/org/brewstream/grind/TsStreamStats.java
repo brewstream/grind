@@ -36,6 +36,10 @@ import java.util.List;
  * @param transportErrors  packets flagged corrupt by an upstream demodulator
  * @param duplicates       packets repeating the previous counter, which the spec permits
  * @param syncLosses       how many times packet alignment had to be regained
+ * @param tableCrcFailures PSI sections discarded for a bad checksum — loss on a table PID,
+ *                         which is worse than loss on a video PID because it can leave the
+ *                         stream's structure unknown
+ * @param programs         what the stream carries, as far as its tables have revealed
  * @param pids             per-PID detail, in the order the PIDs first appeared
  */
 public record TsStreamStats(
@@ -47,6 +51,8 @@ public record TsStreamStats(
         long transportErrors,
         long duplicates,
         long syncLosses,
+        long tableCrcFailures,
+        ProgramMap programs,
         List<PidStats> pids) {
 
     /**
@@ -64,7 +70,8 @@ public record TsStreamStats(
      * worth making cheap to check.
      */
     public boolean isHealthy() {
-        return continuityErrors == 0 && transportErrors == 0 && syncLosses == 0;
+        return continuityErrors == 0 && transportErrors == 0 && syncLosses == 0
+                && tableCrcFailures == 0;
     }
 
     /** The stats for one PID, or {@code null} if that PID has not been seen. */

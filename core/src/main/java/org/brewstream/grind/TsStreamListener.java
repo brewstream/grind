@@ -74,6 +74,20 @@ public interface TsStreamListener {
     default void onScramblingChanged(int pid, boolean scrambled) {
     }
 
+    /**
+     * The stream's table of contents changed: a PAT or PMT arrived and said
+     * something different from what was known before.
+     *
+     * <p>Fires on the first PAT too, which is how a consumer learns what the
+     * stream carries at all. After that it means a genuine change — a program
+     * added or removed, a track's PID or codec changed — which on a live feed
+     * usually means the source was reconfigured or switched.
+     *
+     * @param programs the new map, already assembled
+     */
+    default void onProgramsChanged(ProgramMap programs) {
+    }
+
     /** A PID carried its first packet — how a consumer learns what is in the stream. */
     default void onPidDiscovered(int pid) {
     }

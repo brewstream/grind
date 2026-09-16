@@ -61,6 +61,10 @@ public final class TsAnalyzer {
 
     private final List<TsStreamListener> listeners = new ArrayList<>();
     private final Map<Integer, PidState> byPid = new LinkedHashMap<>();
+    /** One section assembler per PSI PID: PID 0 from the start, PMT PIDs as the PAT names them. */
+    private final Map<Integer, SectionAssembler> psiAssemblers = new LinkedHashMap<>();
+
+    private ProgramMap programMap = ProgramMap.EMPTY;
 
     private long packets;
     private long bytes;
@@ -122,6 +126,75 @@ public final class TsAnalyzer {
         trackScrambling(packet, state);
         trackContinuity(packet, state);
         trackPcr(packet, state);
+        trackTables(packet);
+    }
+
+    /**
+     * Feeds PSI packets to their section assemblers and applies whatever tables
+     * come out.
+     *
+     * <p>Only PID 0 and the PMT PIDs the PAT names are assembled. Running an
+     * assembler over every PID would try to read video as tables, which is not
+     * merely wasteful: a PES payload will occasionally look like a plausible
+     * section header, and the CRC is the only thing standing between that and a
+     * fabricated program map.
+     */
+    private void trackTables(TsPacket packet) {
+        SectionAssembler assembler = psiAssemblers.get(packet.pid());
+        if (assembler == null) {
+            if (packet.pid() != TsPacket.PAT_PID && !programMap.pmtPids().containsValue(packet.pid())) {
+                return;
+            }
+            assembler = new SectionAssembler();
+            psiAssemblers.put(packet.pid(), assembler);
+        }
+
+        for (TableSection section : assembler.consume(packet)) {
+            if (!section.current()) {
+                // Describes a future state, not the one in force. Applying it
+                // would report tracks the stream is not carrying yet.
+                continue;
+            }
+            applySection(packet.pid(), section);
+        }
+    }
+
+    private void applySection(int pid, TableSection section) {
+        ProgramMap previous = programMap;
+
+        if (pid == TsPacket.PAT_PID && section.tableId() == TableSection.TABLE_ID_PAT) {
+            ProgramAssociationTable pat = ProgramAssociationTable.parse(section);
+            if (pat == null) {
+                return;
+            }
+            programMap = ProgramMap.fromPat(pat, previous);
+            // A PMT PID that is no longer listed stops being assembled; one that
+            // has just appeared starts on its next packet.
+            psiAssemblers.keySet().removeIf(
+                    assembled -> assembled != TsPacket.PAT_PID
+                            && !programMap.pmtPids().containsValue(assembled));
+        } else if (section.tableId() == TableSection.TABLE_ID_PMT) {
+            ProgramMapTable pmt = ProgramMapTable.parse(section);
+            if (pmt == null) {
+                return;
+            }
+            programMap = programMap.withProgram(pmt.programNumber(), pmt);
+        } else {
+            return; // a table this library does not read yet - SDT, EIT, NIT
+        }
+
+        if (!programMap.equals(previous)) {
+            ProgramMap announced = programMap;
+            fire(listener -> listener.onProgramsChanged(announced));
+        }
+    }
+
+    /**
+     * What the stream carries, as far as its tables have revealed. Empty until a
+     * PAT arrives.
+     */
+    public ProgramMap programs() {
+        return programMap;
     }
 
     /**
@@ -221,8 +294,12 @@ public final class TsAnalyzer {
                     state.packetsLost, state.transportErrors, state.duplicates, state.scrambled,
                     state.lastPcr, state.pcrCount, state.pcrDiscontinuities));
         }
+        long crcFailures = 0;
+        for (SectionAssembler assembler : psiAssemblers.values()) {
+            crcFailures += assembler.crcFailures();
+        }
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
-                transportErrors, duplicates, syncLosses, List.copyOf(pids));
+                transportErrors, duplicates, syncLosses, crcFailures, programMap, List.copyOf(pids));
     }
 
     private void fire(java.util.function.Consumer<TsStreamListener> event) {

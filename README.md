@@ -13,8 +13,9 @@ A companion module ships Netty handlers, so an SRT stream from
 [Roast](https://github.com/brewstream/roast) can be inspected by adding two
 handlers to a pipeline.
 
-**Status:** early. The transport packet layer is implemented and tested against
-real streams; see the roadmap below for what is coming and in what order.
+**Status:** early. Packets, adaptation fields, PCR, PSI section assembly, PAT and
+PMT are implemented and tested against real streams — enough to say what a stream
+contains and whether it is healthy. See the roadmap for what is next.
 
 ## Requirements
 
@@ -66,10 +67,34 @@ Then poll for the dashboard, alongside Roast's own `ConnectionStats`:
 ```java
 TsStreamStats media = analyzer.stats();
 
-media.isHealthy();        // nothing lost, corrupt, or unaligned
+media.isHealthy();        // nothing lost, corrupt, unaligned, or failing its CRC
 media.lossRate();         // the number to lead with
 media.pid(0x100).lossRate();
 ```
+
+## Knowing what the stream carries
+
+The tables turn PID numbers into something a person can read, which is the
+difference between a dashboard and a hex dump:
+
+```java
+ProgramMap programs = analyzer.programs();
+
+programs.describe(0x100);        // "program 1 H.264 / AVC"
+programs.programs().get(1).pcrPid();
+programs.allStreams();           // every track across every program
+```
+
+`onProgramsChanged` fires when the PAT or PMT says something new — on the first
+tables, and afterwards only on a real change, not on the repeats a multiplexer
+sends constantly.
+
+Sections are reassembled across packets and CRC-checked before being believed. A
+table stitched across a continuity break parses perfectly well and describes a
+stream that does not exist, so failures are counted in
+`TsStreamStats.tableCrcFailures()` and make `isHealthy()` false — loss on a table
+PID is worse than loss on a video PID, because it can leave the structure
+unknown.
 
 `MpegTsDecoder` handles the part that is easy to get wrong: packets are 188
 bytes and nothing makes a network read land on a boundary. It also regains
@@ -111,8 +136,8 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 
 | Phase | Scope | State |
 |---|---|:---:|
-| **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; continuity tracking; PES headers (PTS/DTS); per-PID bitrate and stats | packet layer done |
-| **2 — Elementary streams** | PES payload reassembly into access units; track model; codec identification from `stream_type` and descriptors; frame boundaries and random-access points | planned |
+| **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; continuity tracking; per-PID stats | done except PES headers |
+| **2 — Elementary streams** | PES headers (PTS/DTS); payload reassembly into access units; frame boundaries and random-access points | next |
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing; SCTE-35 splice information | planned |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
