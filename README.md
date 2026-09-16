@@ -13,9 +13,10 @@ A companion module ships Netty handlers, so an SRT stream from
 [Roast](https://github.com/brewstream/roast) can be inspected by adding two
 handlers to a pipeline.
 
-**Status:** early. Packets, adaptation fields, PCR, PSI section assembly, PAT and
-PMT are implemented and tested against real streams — enough to say what a stream
-contains and whether it is healthy. See the roadmap for what is next.
+**Status:** phase 1 complete. Packets, adaptation fields, PCR, PSI section
+assembly, PAT, PMT and PES headers are implemented and tested against real
+streams — enough to say what a stream contains, how it is timed, and whether it
+is healthy. See the roadmap for what is next.
 
 ## Requirements
 
@@ -85,6 +86,21 @@ programs.programs().get(1).pcrPid();
 programs.allStreams();           // every track across every program
 ```
 
+Per-track timing comes from the PES headers:
+
+```java
+PidStats video = media.pid(0x100);
+
+video.lastPtsSeconds();   // presentation time of the most recent frame
+video.pesPackets();       // PES packets, which is frames for video
+video.streamId();         // 0xE0 video, 0xC0 audio
+```
+
+Note `pesPackets` counts PES packets, not access units. Video here carries one
+frame per packet so the two coincide, but audio commonly packs many frames into
+one — this file puts 88 AAC frames in 6 PES packets. Calling it a frame count
+would be right for video and wrong by a factor of fifteen for audio.
+
 `onProgramsChanged` fires when the PAT or PMT says something new — on the first
 tables, and afterwards only on a real change, not on the repeats a multiplexer
 sends constantly.
@@ -136,8 +152,8 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 
 | Phase | Scope | State |
 |---|---|:---:|
-| **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; continuity tracking; per-PID stats | done except PES headers |
-| **2 — Elementary streams** | PES headers (PTS/DTS); payload reassembly into access units; frame boundaries and random-access points | next |
+| **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; PES headers (PTS/DTS); continuity tracking; per-PID stats | **done** |
+| **2 — Elementary streams** | PES payload reassembly into access units; frame boundaries and random-access points; PTS-to-PCR skew | next |
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing; SCTE-35 splice information | planned |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |

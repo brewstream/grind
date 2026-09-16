@@ -73,6 +73,7 @@ public final class TsAnalyzer {
     private long packetsLost;
     private long transportErrors;
     private long duplicates;
+    private long pesPackets;
     private long syncLosses;
 
     /** Registers a listener. Called synchronously on the consuming thread; see {@link TsStreamListener}. */
@@ -127,6 +128,51 @@ public final class TsAnalyzer {
         trackContinuity(packet, state);
         trackPcr(packet, state);
         trackTables(packet);
+        trackPes(packet, state);
+    }
+
+    /**
+     * Reads the PES header of a packet that starts one, recording the track's
+     * timing.
+     *
+     * <p>Only attempted on PIDs a PMT named as elementary streams. A PES start
+     * code is three bytes and will occur by chance inside compressed video, so
+     * scanning every PID for one would invent timestamps from picture data.
+     */
+    private void trackPes(TsPacket packet, PidState state) {
+        if (!packet.payloadUnitStart() || !packet.hasPayload() || !isElementaryStream(packet.pid())) {
+            return;
+        }
+
+        byte[] payload = packet.payload();
+        PesHeader header = PesHeader.parse(payload, 0, payload.length);
+        if (header == null) {
+            return;
+        }
+
+        state.pesPackets++;
+        pesPackets++;
+        state.streamId = header.streamId();
+        if (header.hasPts()) {
+            // A backwards PTS is not necessarily wrong: with B-frames the
+            // presentation order is not the transmission order, which is exactly
+            // what the DTS exists to express. Recorded, not judged.
+            state.lastPts = header.pts();
+        }
+        if (header.hasDts()) {
+            state.lastDts = header.dts();
+        }
+    }
+
+    private boolean isElementaryStream(int pid) {
+        for (ProgramMapTable table : programMap.programs().values()) {
+            for (ElementaryStream stream : table.streams()) {
+                if (stream.pid() == pid) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -292,14 +338,16 @@ public final class TsAnalyzer {
         for (PidState state : byPid.values()) {
             pids.add(new PidStats(state.pid, state.packets, state.bytes, state.continuityErrors,
                     state.packetsLost, state.transportErrors, state.duplicates, state.scrambled,
-                    state.lastPcr, state.pcrCount, state.pcrDiscontinuities));
+                    state.lastPcr, state.pcrCount, state.pcrDiscontinuities,
+                    state.pesPackets, state.lastPts, state.lastDts, state.streamId));
         }
         long crcFailures = 0;
         for (SectionAssembler assembler : psiAssemblers.values()) {
             crcFailures += assembler.crcFailures();
         }
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
-                transportErrors, duplicates, syncLosses, crcFailures, programMap, List.copyOf(pids));
+                transportErrors, duplicates, pesPackets, syncLosses, crcFailures, programMap,
+                List.copyOf(pids));
     }
 
     private void fire(java.util.function.Consumer<TsStreamListener> event) {
@@ -330,6 +378,10 @@ public final class TsAnalyzer {
         private long lastPcr = -1;
         private long pcrCount;
         private long pcrDiscontinuities;
+        private long pesPackets;
+        private long lastPts = -1;
+        private long lastDts = -1;
+        private int streamId = -1;
 
         private PidState(int pid) {
             this.pid = pid;

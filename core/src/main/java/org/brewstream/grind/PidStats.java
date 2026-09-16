@@ -30,6 +30,12 @@ package org.brewstream.grind;
  * @param lastPcr             the most recent PCR in 27 MHz units, or -1 if this PID carries none
  * @param pcrCount            how many PCRs this PID has carried
  * @param pcrDiscontinuities  unannounced jumps in that clock
+ * @param pesPackets        PES packets started on this PID. One frame per packet for video,
+ *                          but audio commonly packs many frames into one, so this is a frame
+ *                          count only for video and undercounts audio badly
+ * @param lastPts           the most recent presentation timestamp in 90 kHz units, or -1
+ * @param lastDts           the most recent decode timestamp, or -1 when frames are not reordered
+ * @param streamId          the PES stream id last seen, or -1 if this PID carries no PES
  */
 public record PidStats(
         int pid,
@@ -42,11 +48,25 @@ public record PidStats(
         boolean scrambled,
         long lastPcr,
         long pcrCount,
-        long pcrDiscontinuities) {
+        long pcrDiscontinuities,
+        long pesPackets,
+        long lastPts,
+        long lastDts,
+        int streamId) {
 
     /** Whether this PID carries the program clock. */
     public boolean carriesPcr() {
         return pcrCount > 0;
+    }
+
+    /** Whether this PID carries an elementary stream, as opposed to tables or stuffing. */
+    public boolean carriesPes() {
+        return pesPackets > 0;
+    }
+
+    /** The most recent presentation timestamp in seconds, or -1. */
+    public double lastPtsSeconds() {
+        return lastPts < 0 ? -1 : (double) lastPts / PesHeader.TIMESTAMP_RATE_HZ;
     }
 
     /**

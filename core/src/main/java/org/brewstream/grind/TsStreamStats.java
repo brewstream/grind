@@ -35,6 +35,7 @@ import java.util.List;
  * @param packetsLost      how many packets those jumps account for
  * @param transportErrors  packets flagged corrupt by an upstream demodulator
  * @param duplicates       packets repeating the previous counter, which the spec permits
+ * @param pesPackets       PES packets started across all elementary streams
  * @param syncLosses       how many times packet alignment had to be regained
  * @param tableCrcFailures PSI sections discarded for a bad checksum — loss on a table PID,
  *                         which is worse than loss on a video PID because it can leave the
@@ -50,6 +51,7 @@ public record TsStreamStats(
         long packetsLost,
         long transportErrors,
         long duplicates,
+        long pesPackets,
         long syncLosses,
         long tableCrcFailures,
         ProgramMap programs,
