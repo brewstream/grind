@@ -1,1 +1,4 @@
 rootProject.name = 'grind'
+
+include 'core'
+include 'netty'

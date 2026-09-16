@@ -8,9 +8,10 @@ per track. It is a parser and an inspector, deliberately **not** a decoder — y
 can answer every question a stream-health dashboard asks without decoding a
 single frame, and decoding H.264 or AAC in pure Java is a different project.
 
-It has **no dependencies** and knows nothing about how the bytes arrived. Pair it
-with [Roast](https://github.com/brewstream/roast) for SRT ingest, or feed it from
-a file, UDP socket, or anything else.
+The core has **no dependencies** and knows nothing about how the bytes arrived.
+A companion module ships Netty handlers, so an SRT stream from
+[Roast](https://github.com/brewstream/roast) can be inspected by adding two
+handlers to a pipeline.
 
 **Status:** early. The transport packet layer is implemented and tested against
 real streams; see the roadmap below for what is coming and in what order.
@@ -19,8 +20,14 @@ real streams; see the roadmap below for what is coming and in what order.
 
 Java 21 or newer.
 
-**Not yet published.** Consume it as a Gradle composite build until a release is
-cut:
+Two artifacts:
+
+| Module | Purpose | Dependencies |
+|---|---|---|
+| `grind` | parser and analyzer | none |
+| `grind-netty` | pipeline handlers | Netty |
+
+**Not yet published.** Consume as a Gradle composite build until a release is cut:
 
 ```groovy
 // settings.gradle
@@ -29,8 +36,46 @@ includeBuild '../grind'
 // build.gradle
 dependencies {
     implementation 'io.github.brewstream:grind'
+    implementation 'io.github.brewstream:grind-netty'   // only if you want the handlers
 }
 ```
+
+## In a Netty pipeline
+
+The reason Roast makes every connection a `Channel`: drop two handlers on it and
+an SRT stream is inspected as it arrives.
+
+```java
+TsAnalyzer analyzer = new TsAnalyzer();
+analyzer.addListener(new TsStreamListener() {
+    @Override
+    public void onContinuityError(int pid, int expected, int actual, int lost) {
+        // Transport loss just became visible media damage.
+        log.warn("lost {} packets on PID 0x{}", lost, Integer.toHexString(pid));
+    }
+});
+
+srtConnection.pipeline().addLast(
+        new MpegTsDecoder(analyzer),      // ByteBuf -> TsPacket, with resync
+        new TsHealthHandler(analyzer),    // counts, then forwards unchanged
+        yourHandler);
+```
+
+Then poll for the dashboard, alongside Roast's own `ConnectionStats`:
+
+```java
+TsStreamStats media = analyzer.stats();
+
+media.isHealthy();        // nothing lost, corrupt, or unaligned
+media.lossRate();         // the number to lead with
+media.pid(0x100).lossRate();
+```
+
+`MpegTsDecoder` handles the part that is easy to get wrong: packets are 188
+bytes and nothing makes a network read land on a boundary. It also regains
+alignment when a stream does not start on a sync byte, requiring `0x47` to recur
+at the packet stride before trusting it — a lone `0x47` inside compressed video
+is an ordinary byte, and a naive scan locks onto noise.
 
 ## Reading a stream
 

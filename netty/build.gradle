@@ -1,0 +1,33 @@
+description = 'Netty handlers for Grind: MPEG-TS decoding and health monitoring in a pipeline'
+
+dependencies {
+    api project(':core')
+    // api, not implementation: ByteBuf and ChannelHandler are in this module's
+    // public API, so a consumer that only got them transitively at runtime could
+    // not compile against it.
+    api platform('io.netty:netty-bom:4.2.17.Final')
+    api 'io.netty:netty-buffer'
+    api 'io.netty:netty-transport'
+    implementation 'io.netty:netty-codec'
+    testImplementation 'io.netty:netty-codec'
+}
+
+mavenPublishing {
+    coordinates(project.group.toString(), 'grind-netty', project.version.toString())
+    pom {
+        name = 'Grind Netty'
+        description = project.description
+    }
+}
+
+base {
+    archivesName = 'grind-netty'
+}
+
+// Shares core's fixture rather than duplicating 111KB of binary into git. One
+// stream, one place to regenerate it, no chance of the two drifting apart.
+sourceSets {
+    test {
+        resources.srcDir project(':core').file('src/test/resources')
+    }
+}
