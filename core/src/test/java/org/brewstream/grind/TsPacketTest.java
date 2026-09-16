@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -173,6 +174,52 @@ class TsPacketTest {
     }
 
     // --- cases a clean stream cannot produce, so they are built by hand
+
+    /**
+     * The payload must be reachable from the packet. It was not: the packet
+     * carried offsets into an array it did not retain, so a caller holding a
+     * TsPacket had indices into nothing. Every existing test passed because they
+     * all read payloadLength and never the bytes.
+     */
+    @Test
+    void thePayloadBytesAreReachableFromTheParsedPacket() throws IOException {
+        byte[] data = sampleStream();
+
+        int checked = 0;
+        for (TsPacket packet : parseAll()) {
+            if (!packet.hasPayload()) {
+                continue;
+            }
+            byte[] payload = packet.payload();
+            assertThat(payload).hasSize(packet.payloadLength());
+            // The bytes must be the ones at that offset in the source stream.
+            for (int i = 0; i < payload.length; i++) {
+                assertThat(payload[i]).isEqualTo(data[packet.payloadOffset() + i]);
+            }
+            // And the zero-allocation path must agree with the copying one.
+            byte[] into = new byte[TsPacket.LENGTH];
+            assertThat(packet.payloadInto(into, 0)).isEqualTo(payload.length);
+            assertThat(Arrays.copyOf(into, payload.length)).isEqualTo(payload);
+            checked++;
+        }
+
+        assertThat(checked).as("payload-carrying packets examined").isGreaterThan(500);
+    }
+
+    /**
+     * An adaptation field longer than the packet, with the control field claiming
+     * no payload. The payload length is zero by definition there, so a guard
+     * derived from it never fired and the malformed packet was accepted.
+     */
+    @Test
+    void anOverlongAdaptationFieldIsRejectedEvenWithNoPayloadExpected() {
+        byte[] data = new byte[TsPacket.LENGTH];
+        data[0] = TsPacket.SYNC_BYTE;
+        data[3] = 0x20;        // adaptation field only, no payload
+        data[4] = (byte) 200;  // longer than the 183 bytes available
+
+        assertThat(TsPacket.parse(data, 0)).isNull();
+    }
 
     @Test
     void aMissingSyncByteReturnsNullSoTheCallerCanResynchronise() {

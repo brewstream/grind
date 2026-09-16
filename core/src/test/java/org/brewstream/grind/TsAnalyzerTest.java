@@ -246,22 +246,128 @@ class TsAnalyzerTest {
         assertThat(analyzer.stats().isHealthy()).isFalse();
     }
 
+    /**
+     * A duplicate packet repeats the previous counter, which §2.4.3.3 permits.
+     * Read as a gap it computes (previous - expected + 16) % 16 == 15, so one
+     * duplicate used to be reported as fifteen lost packets.
+     */
+    @Test
+    void aDuplicatePacketIsNotFifteenLostPackets() {
+        TsAnalyzer analyzer = new TsAnalyzer();
+        List<Integer> lostCounts = new ArrayList<>();
+        analyzer.addListener(new TsStreamListener() {
+            @Override
+            public void onContinuityError(int pid, int expected, int actual, int lost) {
+                lostCounts.add(lost);
+            }
+        });
+
+        analyzer.consume(packet(VIDEO_PID, 5, true, false));
+        analyzer.consume(packet(VIDEO_PID, 5, true, false)); // the same packet again
+
+        assertThat(lostCounts).as("a duplicate is not loss").isEmpty();
+        TsStreamStats stats = analyzer.stats();
+        assertThat(stats.packetsLost()).isZero();
+        assertThat(stats.continuityErrors()).isZero();
+        assertThat(stats.duplicates()).as("counted as what it is").isEqualTo(1);
+        assertThat(stats.pid(VIDEO_PID).duplicates()).isEqualTo(1);
+    }
+
+    /**
+     * An adaptation field can fill a packet exactly, leaving the payload flag set
+     * with no bytes behind it. The counter still advances on the flag, so keying
+     * the expectation off payload *bytes* reported a spurious error every time.
+     */
+    @Test
+    void aPayloadFlagWithNoPayloadBytesStillAdvancesTheCounter() {
+        TsAnalyzer analyzer = new TsAnalyzer();
+
+        analyzer.consume(adaptationFillsPacket(VIDEO_PID, 5));
+        analyzer.consume(adaptationFillsPacket(VIDEO_PID, 6));
+        analyzer.consume(adaptationFillsPacket(VIDEO_PID, 7));
+
+        assertThat(analyzer.stats().continuityErrors())
+                .as("the counter advanced as the flag requires, so nothing is wrong")
+                .isZero();
+        assertThat(analyzer.stats().isHealthy()).isTrue();
+    }
+
+    /** ...and a genuine gap between such packets is still caught. */
+    @Test
+    void aGapBetweenPayloadFlaggedPacketsIsStillLoss() {
+        TsAnalyzer analyzer = new TsAnalyzer();
+
+        analyzer.consume(adaptationFillsPacket(VIDEO_PID, 5));
+        analyzer.consume(adaptationFillsPacket(VIDEO_PID, 8));
+
+        assertThat(analyzer.stats().packetsLost()).isEqualTo(2);
+    }
+
+    /**
+     * The 33-bit PCR base wraps roughly every 26.5 hours. Read naively that is a
+     * huge backwards jump, and a 24/7 stream would report a clock discontinuity
+     * once a day that never happened.
+     */
+    @Test
+    void thePcrWraparoundIsNotAClockDiscontinuity() {
+        long wrap = (1L << 33) * 300;
+        TsAnalyzer analyzer = new TsAnalyzer();
+        List<Long> discontinuities = new ArrayList<>();
+        analyzer.addListener(new TsStreamListener() {
+            @Override
+            public void onPcrDiscontinuity(int pid, long previous, long current) {
+                discontinuities.add(current);
+            }
+        });
+
+        // Just before the wrap, then just after it: 40ms later in real time.
+        analyzer.consume(withPcr(VIDEO_PID, 0, wrap - 27_000_000L / 50));
+        analyzer.consume(withPcr(VIDEO_PID, 1, 27_000_000L / 50));
+
+        assertThat(discontinuities).as("a wrap is not a discontinuity").isEmpty();
+        assertThat(analyzer.stats().pid(VIDEO_PID).pcrDiscontinuities()).isZero();
+    }
+
+    /** A genuine backwards jump, far from the wrap, is still reported. */
+    @Test
+    void aRealBackwardsClockJumpIsStillReported() {
+        TsAnalyzer analyzer = new TsAnalyzer();
+
+        analyzer.consume(withPcr(VIDEO_PID, 0, 10_000_000_000L));
+        analyzer.consume(withPcr(VIDEO_PID, 1, 9_000_000_000L));
+
+        assertThat(analyzer.stats().pid(VIDEO_PID).pcrDiscontinuities()).isEqualTo(1);
+    }
+
     // --- hand-built packets, for damage a clean stream cannot supply
 
     private static TsPacket packet(int pid, int counter, boolean hasPayload, boolean discontinuity) {
         AdaptationField field = discontinuity ? new AdaptationField(true, false, false, -1) : null;
-        return new TsPacket(false, false, false, pid, 0,
+        return new TsPacket(new byte[TsPacket.LENGTH], false, false, false, pid, 0,
                 hasPayload ? AdaptationFieldControl.PAYLOAD_ONLY : AdaptationFieldControl.ADAPTATION_ONLY,
                 counter, field, 4, hasPayload ? TsPacket.LENGTH - 4 : 0);
     }
 
     private static TsPacket errored(int pid, int counter) {
-        return new TsPacket(true, false, false, pid, 0, AdaptationFieldControl.PAYLOAD_ONLY,
-                counter, null, 4, TsPacket.LENGTH - 4);
+        return new TsPacket(new byte[TsPacket.LENGTH], true, false, false, pid, 0,
+                AdaptationFieldControl.PAYLOAD_ONLY, counter, null, 4, TsPacket.LENGTH - 4);
     }
 
     private static TsPacket scrambled(int pid, int counter) {
-        return new TsPacket(false, false, false, pid, 2, AdaptationFieldControl.PAYLOAD_ONLY,
-                counter, null, 4, TsPacket.LENGTH - 4);
+        return new TsPacket(new byte[TsPacket.LENGTH], false, false, false, pid, 2,
+                AdaptationFieldControl.PAYLOAD_ONLY, counter, null, 4, TsPacket.LENGTH - 4);
+    }
+
+    private static TsPacket withPcr(int pid, int counter, long pcr) {
+        return new TsPacket(new byte[TsPacket.LENGTH], false, false, false, pid, 0,
+                AdaptationFieldControl.ADAPTATION_AND_PAYLOAD, counter,
+                new AdaptationField(false, false, false, pcr), 12, TsPacket.LENGTH - 12);
+    }
+
+    /** A packet whose control field claims payload while the adaptation field leaves no room. */
+    private static TsPacket adaptationFillsPacket(int pid, int counter) {
+        return new TsPacket(new byte[TsPacket.LENGTH], false, false, false, pid, 0,
+                AdaptationFieldControl.ADAPTATION_AND_PAYLOAD, counter, AdaptationField.EMPTY,
+                TsPacket.LENGTH, 0);
     }
 }

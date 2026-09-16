@@ -16,6 +16,9 @@
 
 package org.brewstream.grind;
 
+import java.util.Arrays;
+import java.util.Objects;
+
 /**
  * One MPEG-TS transport packet: a fixed 188 bytes, four of header and the rest
  * split between an optional adaptation field and an optional payload
@@ -24,46 +27,24 @@ package org.brewstream.grind;
  * <p><b>A view, not a copy.</b> Parsing records where the payload sits rather
  * than extracting it, because a transport stream at broadcast rates is tens of
  * thousands of these a second and copying each one's payload would dominate the
- * cost of doing anything useful with them. {@link #payloadOffset} and
- * {@link #payloadLength} index into the caller's own array.
+ * cost of doing anything useful with them. The packet keeps a reference to the
+ * array it was parsed from, so {@link #payload()} and
+ * {@link #payloadInto(byte[], int)} can reach the bytes — <b>that array must
+ * outlive the packet, and must not be modified while the packet is in use</b>.
+ * A caller reusing one buffer across packets has to consume each packet before
+ * reading the next.
+ *
+ * <p>This is a class rather than a record precisely because of that array: a
+ * record would derive {@code equals} from array identity, which is a worse
+ * answer than being explicit. {@link #equals} compares the header fields and the
+ * payload bytes, so two packets parsed from different buffers can be equal.
  *
  * <p><b>Why {@code byte[]} rather than {@code ByteBuffer} or Netty's
- * {@code ByteBuf}.</b> This library deliberately has no dependencies, and a
+ * {@code ByteBuf}.</b> This module deliberately has no dependencies, and a
  * parser that owns no buffer type is the easiest to bridge to whichever one the
- * caller already has. A Netty {@code ByteBuf} reaches this through
- * {@code readBytes} into a reusable array, or {@code nioBuffer().array()} for a
- * heap buffer, with no copy in the second case.
- *
- * @param transportErrorIndicator set by an upstream demodulator to mean "this packet is
- *                                known corrupt". Its payload should not be trusted, and
- *                                its continuity counter should not be treated as a
- *                                discontinuity (§2.4.3.3)
- * @param payloadUnitStart        for a PES PID, this packet begins a new PES packet; for a
- *                                PSI PID, it begins a new section and the payload's first
- *                                byte is a pointer field
- * @param transportPriority       a hint from the multiplexer that this packet matters more
- *                                than others on the same PID; carried, not acted on
- * @param pid                     which elementary stream or table this packet belongs to, 13 bits
- * @param scramblingControl       0 means clear; anything else means the payload is
- *                                encrypted and parsing it further is meaningless
- * @param adaptationFieldControl  which of adaptation field and payload are present
- * @param continuityCounter       increments per packet on a PID, wrapping at 16 — the basis
- *                                of loss detection
- * @param adaptationField         the parsed adaptation field, or {@code null} when absent
- * @param payloadOffset           index into the source array where the payload starts
- * @param payloadLength           payload length in bytes; zero when there is no payload
+ * caller already has. The {@code grind-netty} module carries the Netty glue.
  */
-public record TsPacket(
-        boolean transportErrorIndicator,
-        boolean payloadUnitStart,
-        boolean transportPriority,
-        int pid,
-        int scramblingControl,
-        AdaptationFieldControl adaptationFieldControl,
-        int continuityCounter,
-        AdaptationField adaptationField,
-        int payloadOffset,
-        int payloadLength) {
+public final class TsPacket {
 
     /** Every transport packet is exactly this long (§2.4.3.2). */
     public static final int LENGTH = 188;
@@ -80,14 +61,56 @@ public record TsPacket(
     /** The PID carrying the Program Association Table, fixed by the spec. */
     public static final int PAT_PID = 0x0000;
 
+    private static final byte[] NO_DATA = new byte[0];
+
+    private final byte[] data;
+    private final boolean transportErrorIndicator;
+    private final boolean payloadUnitStart;
+    private final boolean transportPriority;
+    private final int pid;
+    private final int scramblingControl;
+    private final AdaptationFieldControl adaptationFieldControl;
+    private final int continuityCounter;
+    private final AdaptationField adaptationField;
+    private final int payloadOffset;
+    private final int payloadLength;
+
+    /**
+     * Constructs a packet directly, for synthesising one rather than parsing it.
+     *
+     * @param data          the array {@code payloadOffset} indexes into. May be empty when the
+     *                      packet is synthesised and carries no readable payload, in which case
+     *                      {@code payloadLength} must be zero
+     * @param payloadOffset index into {@code data} where the payload starts
+     * @param payloadLength payload length in bytes; zero when there is no payload
+     */
+    public TsPacket(byte[] data, boolean transportErrorIndicator, boolean payloadUnitStart,
+            boolean transportPriority, int pid, int scramblingControl,
+            AdaptationFieldControl adaptationFieldControl, int continuityCounter,
+            AdaptationField adaptationField, int payloadOffset, int payloadLength) {
+        this.data = data == null ? NO_DATA : data;
+        this.transportErrorIndicator = transportErrorIndicator;
+        this.payloadUnitStart = payloadUnitStart;
+        this.transportPriority = transportPriority;
+        this.pid = pid;
+        this.scramblingControl = scramblingControl;
+        this.adaptationFieldControl = adaptationFieldControl;
+        this.continuityCounter = continuityCounter;
+        this.adaptationField = adaptationField;
+        this.payloadOffset = payloadOffset;
+        this.payloadLength = payloadLength;
+    }
+
     /**
      * Parses the 188 bytes starting at {@code offset}.
      *
-     * @param data   the source array; not modified or retained beyond this call
+     * @param data   the array to parse from. Retained by the returned packet so its
+     *               payload stays reachable, so it must outlive the packet
      * @param offset index of the sync byte
-     * @return the parsed packet, or {@code null} if the sync byte is not where it
-     *         should be — which means the caller has lost alignment and needs to
-     *         resynchronise rather than that this one packet is bad
+     * @return the parsed packet, or {@code null} if the packet is not usable — the
+     *         sync byte is not where it should be, or the adaptation field claims
+     *         more bytes than the packet holds. Either way the caller has to
+     *         resynchronise rather than trust the next 188 bytes
      * @throws IndexOutOfBoundsException if fewer than {@link #LENGTH} bytes remain
      */
     public static TsPacket parse(byte[] data, int offset) {
@@ -125,15 +148,105 @@ public record TsPacket(
             cursor += 1 + adaptationLength;
         }
 
-        int payloadLength = control.hasPayload() ? offset + LENGTH - cursor : 0;
-        if (payloadLength < 0) {
-            // An adaptation field longer than the packet. Malformed rather than
-            // merely unaligned, but the caller's recovery is the same: resync.
+        // Checked against the packet end regardless of whether a payload is
+        // expected. Deriving this from payloadLength alone missed the case where
+        // the control field says "adaptation only": the length was then zero by
+        // definition, so an adaptation field claiming 200 bytes sailed through
+        // and produced a packet describing bytes that are not in it.
+        if (cursor > offset + LENGTH) {
             return null;
         }
 
-        return new TsPacket(errorIndicator, unitStart, priority, pid, scrambling, control,
+        int payloadLength = control.hasPayload() ? offset + LENGTH - cursor : 0;
+        return new TsPacket(data, errorIndicator, unitStart, priority, pid, scrambling, control,
                 counter, adaptationField, control.hasPayload() ? cursor : offset + LENGTH, payloadLength);
+    }
+
+    /**
+     * Set by an upstream demodulator to mean "this packet is known corrupt". Its
+     * payload should not be trusted, and its continuity counter should not be
+     * treated as a discontinuity (§2.4.3.3).
+     */
+    public boolean transportErrorIndicator() {
+        return transportErrorIndicator;
+    }
+
+    /**
+     * For a PES PID, this packet begins a new PES packet; for a PSI PID, it
+     * begins a new section and the payload's first byte is a pointer field.
+     */
+    public boolean payloadUnitStart() {
+        return payloadUnitStart;
+    }
+
+    /** A hint from the multiplexer that this packet matters more than others on the same PID. */
+    public boolean transportPriority() {
+        return transportPriority;
+    }
+
+    /** Which elementary stream or table this packet belongs to, 13 bits. */
+    public int pid() {
+        return pid;
+    }
+
+    /** Zero means clear; anything else means the payload is encrypted. */
+    public int scramblingControl() {
+        return scramblingControl;
+    }
+
+    /** Which of adaptation field and payload are present. */
+    public AdaptationFieldControl adaptationFieldControl() {
+        return adaptationFieldControl;
+    }
+
+    /** Increments per packet on a PID, wrapping at 16 — the basis of loss detection. */
+    public int continuityCounter() {
+        return continuityCounter;
+    }
+
+    /** The parsed adaptation field, or {@code null} when absent. */
+    public AdaptationField adaptationField() {
+        return adaptationField;
+    }
+
+    /** Index into the backing array where the payload starts. */
+    public int payloadOffset() {
+        return payloadOffset;
+    }
+
+    /** Payload length in bytes; zero when there is no payload. */
+    public int payloadLength() {
+        return payloadLength;
+    }
+
+    /**
+     * The payload bytes, copied into a fresh array.
+     *
+     * <p>Allocates, so it suits inspection rather than a per-packet hot path —
+     * use {@link #payloadInto(byte[], int)} there.
+     *
+     * @return the payload, or an empty array when the packet carries none
+     */
+    public byte[] payload() {
+        if (payloadLength == 0) {
+            return NO_DATA;
+        }
+        return Arrays.copyOfRange(data, payloadOffset, payloadOffset + payloadLength);
+    }
+
+    /**
+     * Copies the payload into {@code destination} without allocating.
+     *
+     * @param destination where to copy to
+     * @param offset      index in {@code destination} to start at
+     * @return how many bytes were copied, which is {@link #payloadLength()}
+     * @throws IndexOutOfBoundsException if the payload does not fit
+     */
+    public int payloadInto(byte[] destination, int offset) {
+        if (payloadLength > 0) {
+            System.arraycopy(data, payloadOffset, destination, offset, payloadLength);
+        }
+        return payloadLength;
     }
 
     /** Whether this packet is multiplexer stuffing that carries nothing. */
@@ -146,17 +259,59 @@ public record TsPacket(
         return scramblingControl != 0;
     }
 
-    /** Whether this packet carries any payload bytes at all. */
+    /**
+     * Whether this packet carries any payload <em>bytes</em>.
+     *
+     * <p>Distinct from {@code adaptationFieldControl().hasPayload()}, which is
+     * the flag on the wire. The two disagree when an adaptation field fills the
+     * packet exactly: the control field says payload, and there are no bytes left
+     * for one. Continuity counting must use the flag, not this — the counter
+     * increments on the flag (§2.4.3.3), and using this instead reports a
+     * spurious error on every such packet.
+     */
     public boolean hasPayload() {
         return payloadLength > 0;
     }
 
     /**
      * The program clock reference this packet carries, in 27 MHz units, or
-     * {@code -1} if it carries none. Only some packets on a program's designated
-     * PCR PID carry one.
+     * {@code -1} if it carries none.
      */
     public long pcr() {
         return adaptationField == null ? -1 : adaptationField.pcr();
+    }
+
+    /** Compares header fields and payload content, not the identity of the backing array. */
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof TsPacket that)) {
+            return false;
+        }
+        return transportErrorIndicator == that.transportErrorIndicator
+                && payloadUnitStart == that.payloadUnitStart
+                && transportPriority == that.transportPriority
+                && pid == that.pid
+                && scramblingControl == that.scramblingControl
+                && adaptationFieldControl == that.adaptationFieldControl
+                && continuityCounter == that.continuityCounter
+                && Objects.equals(adaptationField, that.adaptationField)
+                && Arrays.equals(payload(), that.payload());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(transportErrorIndicator, payloadUnitStart, transportPriority, pid,
+                scramblingControl, adaptationFieldControl, continuityCounter, adaptationField,
+                Arrays.hashCode(payload()));
+    }
+
+    @Override
+    public String toString() {
+        return "TsPacket[pid=0x" + Integer.toHexString(pid) + ", cc=" + continuityCounter
+                + ", " + adaptationFieldControl + ", payload=" + payloadLength + " bytes"
+                + (isScrambled() ? ", scrambled" : "") + "]";
     }
 }

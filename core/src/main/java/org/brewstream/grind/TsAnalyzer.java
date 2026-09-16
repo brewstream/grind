@@ -52,6 +52,13 @@ public final class TsAnalyzer {
      */
     private static final long PCR_DISCONTINUITY_THRESHOLD = 27_000_000L / 10;
 
+    /**
+     * The full span of the PCR before it wraps: the base is 33 bits of 90 kHz,
+     * and each base tick is 300 of the 27 MHz units this class works in
+     * (§2.4.3.5). About 26.5 hours.
+     */
+    private static final long PCR_WRAP_MAGNITUDE = (1L << 33) * 300;
+
     private final List<TsStreamListener> listeners = new ArrayList<>();
     private final Map<Integer, PidState> byPid = new LinkedHashMap<>();
 
@@ -61,6 +68,7 @@ public final class TsAnalyzer {
     private long continuityErrors;
     private long packetsLost;
     private long transportErrors;
+    private long duplicates;
     private long syncLosses;
 
     /** Registers a listener. Called synchronously on the consuming thread; see {@link TsStreamListener}. */
@@ -142,9 +150,14 @@ public final class TsAnalyzer {
             return;
         }
 
-        // The counter only advances on packets that carry a payload; an
-        // adaptation-only packet legitimately repeats the previous value (§2.4.3.3).
-        int expected = packet.hasPayload() ? (state.previousCounter + 1) % 16 : state.previousCounter;
+        // Keyed on the payload *flag*, not on whether payload bytes are present.
+        // The counter advances whenever adaptation_field_control has the payload
+        // bit set (§2.4.3.3), and an adaptation field can fill a packet exactly,
+        // leaving the flag set with zero bytes behind it. Reading payloadLength
+        // instead reported a spurious error on every such packet.
+        boolean advances = packet.adaptationFieldControl().hasPayload();
+        int previous = state.previousCounter;
+        int expected = advances ? (previous + 1) % 16 : previous;
         state.previousCounter = counter;
 
         if (counter == expected) {
@@ -154,6 +167,16 @@ public final class TsAnalyzer {
             // Announced, so not loss. The stream is telling us the jump is
             // deliberate - a splice or a restart - and treating it as damage
             // would report an error on every well-formed ad insertion.
+            return;
+        }
+        if (advances && counter == previous) {
+            // A duplicate packet, which §2.4.3.3 permits: the multiplexer may
+            // send a packet twice, with the same counter. Treated as a gap this
+            // computes (previous - expected + 16) % 16 == 15, so one duplicate
+            // was reported as fifteen lost packets - a dashboard reading that
+            // would be worse than useless.
+            state.duplicates++;
+            duplicates++;
             return;
         }
 
@@ -174,6 +197,12 @@ public final class TsAnalyzer {
         state.pcrCount++;
         if (state.lastPcr >= 0) {
             long delta = pcr - state.lastPcr;
+            // The 33-bit base wraps about every 26.5 hours, which on a 24/7
+            // stream would otherwise look like a huge backwards jump exactly
+            // once a day. Recognise it by its magnitude and fold it forward.
+            if (delta < 0 && -delta > PCR_WRAP_MAGNITUDE / 2) {
+                delta += PCR_WRAP_MAGNITUDE;
+            }
             boolean announced = packet.adaptationField() != null && packet.adaptationField().discontinuity();
             if (!announced && (delta < 0 || delta > PCR_DISCONTINUITY_THRESHOLD)) {
                 long previous = state.lastPcr;
@@ -189,11 +218,11 @@ public final class TsAnalyzer {
         List<PidStats> pids = new ArrayList<>(byPid.size());
         for (PidState state : byPid.values()) {
             pids.add(new PidStats(state.pid, state.packets, state.bytes, state.continuityErrors,
-                    state.packetsLost, state.transportErrors, state.scrambled, state.lastPcr,
-                    state.pcrCount, state.pcrDiscontinuities));
+                    state.packetsLost, state.transportErrors, state.duplicates, state.scrambled,
+                    state.lastPcr, state.pcrCount, state.pcrDiscontinuities));
         }
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
-                transportErrors, syncLosses, List.copyOf(pids));
+                transportErrors, duplicates, syncLosses, List.copyOf(pids));
     }
 
     private void fire(java.util.function.Consumer<TsStreamListener> event) {
@@ -217,6 +246,7 @@ public final class TsAnalyzer {
         private long continuityErrors;
         private long packetsLost;
         private long transportErrors;
+        private long duplicates;
         private boolean scrambled;
         private boolean hasPrevious;
         private int previousCounter;

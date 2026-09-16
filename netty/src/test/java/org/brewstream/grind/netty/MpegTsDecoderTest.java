@@ -147,6 +147,47 @@ class MpegTsDecoderTest {
         }
     }
 
+    /**
+     * The point of the Netty module: a downstream handler must be able to read
+     * the payload bytes. It could not — the decoder parsed from a local array
+     * the packet did not retain, so every TsPacket reaching a handler carried
+     * indices into a discarded buffer. Nothing caught it because the analyzer
+     * reads payloadLength and never the bytes.
+     */
+    @Test
+    void aDownstreamHandlerCanReadThePayloadBytes() throws IOException {
+        byte[] data = sample();
+        EmbeddedChannel channel = new EmbeddedChannel(new MpegTsDecoder());
+
+        channel.writeInbound(Unpooled.wrappedBuffer(data));
+
+        int checked = 0;
+        long payloadBytes = 0;
+        int packetIndex = 0;
+        for (TsPacket packet : drain(channel)) {
+            if (packet.hasPayload()) {
+                byte[] payload = packet.payload();
+                assertThat(payload).hasSize(packet.payloadLength());
+                // Compare against the same bytes in the original stream: the
+                // packet's own offset is relative to its private copy, so locate
+                // it by packet index instead.
+                int sourceStart = packetIndex * TsPacket.LENGTH
+                        + (TsPacket.LENGTH - packet.payloadLength());
+                for (int i = 0; i < payload.length; i++) {
+                    assertThat(payload[i])
+                            .as("packet %d payload byte %d", packetIndex, i)
+                            .isEqualTo(data[sourceStart + i]);
+                }
+                payloadBytes += payload.length;
+                checked++;
+            }
+            packetIndex++;
+        }
+
+        assertThat(checked).as("payload-carrying packets examined").isGreaterThan(500);
+        assertThat(payloadBytes).as("real bytes, not zeros").isGreaterThan(80_000);
+    }
+
     /** The health handler must observe without altering what flows downstream. */
     @Test
     void theHealthHandlerCountsPacketsAndPassesThemThrough() throws IOException {

@@ -34,6 +34,7 @@ import java.util.List;
  * @param continuityErrors counter jumps across all PIDs that were not announced
  * @param packetsLost      how many packets those jumps account for
  * @param transportErrors  packets flagged corrupt by an upstream demodulator
+ * @param duplicates       packets repeating the previous counter, which the spec permits
  * @param syncLosses       how many times packet alignment had to be regained
  * @param pids             per-PID detail, in the order the PIDs first appeared
  */
@@ -44,6 +45,7 @@ public record TsStreamStats(
         long continuityErrors,
         long packetsLost,
         long transportErrors,
+        long duplicates,
         long syncLosses,
         List<PidStats> pids) {
 

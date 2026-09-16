@@ -38,6 +38,7 @@ public record PidStats(
         long continuityErrors,
         long packetsLost,
         long transportErrors,
+        long duplicates,
         boolean scrambled,
         long lastPcr,
         long pcrCount,
