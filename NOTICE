@@ -1,0 +1,23 @@
+Grind
+Copyright 2026 the original author or authors.
+
+This product includes software developed at BrewStream.
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------------
+Third-party attribution
+--------------------------------------------------------------------------------
+
+Grind is an independent implementation written against ISO/IEC 13818-1
+(MPEG-2 Systems), which defines the transport stream. No third-party code is
+incorporated, and nothing here is a port of another implementation.
+
+Test fixtures under src/test/resources are generated locally by FFmpeg from
+synthetic sources - its testsrc pattern generator and sine tone generator - so
+they contain no third-party media. The commands that produce them are recorded
+in the test that consumes them, so any fixture can be regenerated from scratch.
+
+FFmpeg's ffprobe, and TSDuck where installed, are used as independent references
+to cross-check what Grind reports about a stream. Neither is distributed with
+this project nor linked against it.

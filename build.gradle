@@ -1,0 +1,97 @@
+plugins {
+    id 'java-library'
+    id 'com.vanniktech.maven.publish' version '0.30.0'
+}
+
+description = 'MPEG-TS inspection and demultiplexing for the JVM'
+
+// Matches Roast: io.github.* because Maven Central verifies namespace ownership,
+// and the io.github form needs only the GitHub org to exist. Java packages stay
+// org.brewstream.grind - Central checks the group ID, never package names.
+group = findProperty('publishGroup') ?: 'io.github.brewstream'
+version = findProperty('version') != 'unspecified' ? findProperty('version') : '0.1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'org.assertj:assertj-core:3.27.7'
+}
+
+test {
+    useJUnitPlatform {
+        excludeTags 'interop'
+    }
+}
+
+// Cross-checks against a real external tool (ffprobe, and TSDuck when present),
+// kept out of `test` for the same reason Roast keeps its interop suite separate:
+// they need binaries a clean checkout will not have.
+tasks.register('interopTest', Test) {
+    description = 'Cross-checks parsing against ffprobe/TSDuck. Skips itself when they are absent.'
+    group = 'verification'
+    useJUnitPlatform { includeTags 'interop' }
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    outputs.upToDateWhen { false }
+}
+
+javadoc {
+    options.addStringOption('Xdoclint:all,-missing', '-quiet')
+}
+
+// Wired into `check` rather than left as a script someone remembers to run.
+tasks.register('licenseCheck', Exec) {
+    description = 'Fails if any Java source is missing the Apache 2.0 header.'
+    group = 'verification'
+    commandLine "${rootDir}/scripts/license-header.sh", '--check'
+}
+tasks.named('check') { dependsOn 'licenseCheck' }
+
+mavenPublishing {
+    publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
+    if (project.findProperty('signing.gnupg.keyName') || project.findProperty('signingInMemoryKey')) {
+        signAllPublications()
+    }
+
+    coordinates(project.group.toString(), 'grind', project.version.toString())
+
+    pom {
+        name = 'Grind'
+        description = project.description
+        url = 'https://github.com/brewstream/grind'
+        inceptionYear = '2026'
+
+        licenses {
+            license {
+                name = 'The Apache License, Version 2.0'
+                url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                distribution = 'repo'
+            }
+        }
+
+        developers {
+            developer {
+                id = 'viniciusccarvalho'
+                name = 'Vinicius Carvalho'
+                url = 'https://github.com/viniciusccarvalho'
+            }
+        }
+
+        scm {
+            connection = 'scm:git:git://github.com/brewstream/grind.git'
+            developerConnection = 'scm:git:ssh://github.com:brewstream/grind.git'
+            url = 'https://github.com/brewstream/grind'
+        }
+    }
+}

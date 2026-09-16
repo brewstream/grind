@@ -1,0 +1,13 @@
+.gradle/
+build/
+out/
+.idea/
+*.iml
+.DS_Store
+
+# Working notes kept out of the repository: narratives of decisions that the
+# javadoc, README and commit messages already record, and which go stale the
+# moment they are written down twice.
+CLAUDE.md
+STATUS.md
+DESIGN.md
