@@ -164,10 +164,24 @@ decode.**
 
 ## How this is verified
 
-Parsing is checked against real transport streams, not hand-built bytes. The test
-fixture is two seconds of H.264 and AAC muxed by FFmpeg, and expectations are
-cross-checked against what `ffprobe` independently reports about the same file —
-video on PID 0x100, audio on 0x101.
+Parsing is checked against real transport streams, not hand-built bytes. Three
+fixtures, each there because the others cannot show something:
+
+| Fixture | Shows |
+|---|---|
+| `sample.ts` | one program, H.264 + AAC, no B-frames |
+| `bframes.ts` | reordered frames, so a real DTS that differs from the PTS |
+| `multiprogram.ts` | two programs, two PMTs on separate PIDs, four tracks |
+
+Expectations are cross-checked against what `ffprobe` and TSDuck independently
+report about the same files.
+
+The second fixture exists for a reason worth stating: **a hand-built input written
+by whoever wrote the parser encodes the same belief as the parser.** The DTS test
+built a timestamp with the same understanding of the 33-bit marker-bit layout
+that the parser reads it with, so a shared misreading would have passed. PTS was
+covered, because ffprobe decodes the same bytes independently — DTS was not,
+because `sample.ts` contains no DTS at all.
 
 Hand-made packets test only that the parser agrees with whoever wrote the test. A
 real multiplexer's output tests that it agrees with the world, including the

@@ -16,6 +16,7 @@
 
 package org.brewstream.grind;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -60,6 +61,10 @@ public record ProgramAssociationTable(
                 programs.put(programNumber, pid);
             }
         }
-        return new ProgramAssociationTable(section.tableIdExtension(), Map.copyOf(programs), networkPid);
+        // Not Map.copyOf: it randomises iteration order per JVM run, which would
+        // make the documented "in the order listed" false and any order-sensitive
+        // consumer intermittently wrong.
+        return new ProgramAssociationTable(section.tableIdExtension(),
+                Collections.unmodifiableMap(programs), networkPid);
     }
 }

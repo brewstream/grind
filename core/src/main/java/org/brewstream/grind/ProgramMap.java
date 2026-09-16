@@ -16,6 +16,7 @@
 
 package org.brewstream.grind;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,7 +90,7 @@ public record ProgramMap(
     ProgramMap withProgram(int programNumber, ProgramMapTable table) {
         Map<Integer, ProgramMapTable> updated = new LinkedHashMap<>(programs);
         updated.put(programNumber, table);
-        return new ProgramMap(transportStreamId, Map.copyOf(updated), pmtPids);
+        return new ProgramMap(transportStreamId, Collections.unmodifiableMap(updated), pmtPids);
     }
 
     /**
@@ -106,6 +107,9 @@ public record ProgramMap(
                 retained.put(programNumber, existing);
             }
         }
-        return new ProgramMap(pat.transportStreamId(), Map.copyOf(retained), pat.programs());
+        // Collections.unmodifiableMap over a LinkedHashMap, not Map.copyOf, which
+        // randomises iteration order - see ProgramAssociationTable.parse.
+        return new ProgramMap(pat.transportStreamId(), Collections.unmodifiableMap(retained),
+                pat.programs());
     }
 }
