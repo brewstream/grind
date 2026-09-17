@@ -292,9 +292,10 @@ the work is comparison rather than new parsing. In order:
 
 ### SCTE-35: scope, and why it is its own module
 
-**Status:** sections, `splice_insert` and `time_signal` are read, with an event
-view carrying both the arrival and the splice time. Segmentation descriptors are
-the next piece.
+**Status:** sections, `splice_insert`, `time_signal` and `segmentation_descriptor`
+are read, with an event view carrying both the arrival and the splice time.
+UPIDs are returned as bytes, rendered as text for the ASCII forms. Remaining:
+`splice_schedule`, per-component splice times, and the rest of the UPID formats.
 
 **Read only.** Grind reports what splice information a stream carries. It does
 not create, modify or remove it. Injection is discussed at the end of this
@@ -351,9 +352,11 @@ Roughly in order, each piece useful on its own:
    `splice_insert` and `time_signal`. `splice_null`, `splice_schedule`, `bandwidth_reservation` and
    private commands should be recognised and reported by name without being
    parsed, so an unfamiliar stream is described rather than ignored.
-5. **`segmentation_descriptor`** (tag `0x02`). Where modern broadcasters put the
-   meaning — event id, segmentation type, UPID, duration. The largest single
-   piece, and worth its own pass.
+5. **`segmentation_descriptor`** (tag `0x02`) — **done**. Event id, segmentation
+   type, UPID and duration, plus the delivery restrictions. Descriptors are
+   matched on their `CUEI` registration as well as the tag, since the tag is
+   only unique within SCTE 35's own registry and another authority's descriptor
+   would otherwise be read as if its fields lined up.
 6. **The event view** — **done**. `SpliceEvent` carries both times and derives
    the pre-roll between them, which reads negative when a warning arrived too
    late to act on.

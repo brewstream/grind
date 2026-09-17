@@ -18,6 +18,10 @@ package org.brewstream.grind.scte;
 
 import org.brewstream.grind.Crc32Mpeg;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
 /**
  * Reads a splice information section, as defined by SCTE 35 section 9.
  *
@@ -37,6 +41,8 @@ public final class SpliceInfoParser {
 
     /** Enough bytes for the descriptor loop length and the CRC that follow a command. */
     private static final int TRAILER_LENGTH = 6;
+
+    private static final byte[] EMPTY = new byte[0];
 
     private SpliceInfoParser() {
     }
@@ -81,7 +87,7 @@ public final class SpliceInfoParser {
             // The command and everything after it is ciphertext. Reported as a
             // section that exists and cannot be read, which is the honest answer:
             // parsing on would produce plausible-looking nonsense.
-            return new SpliceInfoSection(type, ptsAdjustment, tier, true, null, -1);
+            return new SpliceInfoSection(type, ptsAdjustment, tier, true, null, -1, List.of());
         }
 
         // 0xFFF means "unknown length" in SCTE 35; trust the section length instead.
@@ -102,7 +108,127 @@ public final class SpliceInfoParser {
         } else if (type == SpliceCommandType.TIME_SIGNAL) {
             timeSignal = parseSpliceTime(section, at, commandEnd);
         }
-        return new SpliceInfoSection(type, ptsAdjustment, tier, false, insert, timeSignal);
+        return new SpliceInfoSection(type, ptsAdjustment, tier, false, insert, timeSignal,
+                parseDescriptors(section, commandEnd));
+    }
+
+    /**
+     * Reads the descriptor loop that follows the command.
+     *
+     * <p>Only segmentation descriptors are interpreted. Others are stepped over
+     * by their own length rather than skipped wholesale, so one descriptor this
+     * library does not read cannot hide the ones after it.
+     */
+    private static List<SegmentationDescriptor> parseDescriptors(byte[] s, int at) {
+        if (at + 2 > s.length - 4) {
+            return List.of();
+        }
+        int loopLength = ((s[at] & 0xFF) << 8) | (s[at + 1] & 0xFF);
+        at += 2;
+        int loopEnd = Math.min(at + loopLength, s.length - 4);
+
+        List<SegmentationDescriptor> found = new ArrayList<>();
+        while (at + 2 <= loopEnd) {
+            int tag = s[at] & 0xFF;
+            int length = s[at + 1] & 0xFF;
+            int payload = at + 2;
+            int next = payload + length;
+            if (next > loopEnd) {
+                break; // a length running past the loop: stop rather than guess
+            }
+            if (tag == SegmentationDescriptor.TAG) {
+                SegmentationDescriptor descriptor = parseSegmentation(s, payload, next);
+                if (descriptor != null) {
+                    found.add(descriptor);
+                }
+            }
+            at = next;
+        }
+        return List.copyOf(found);
+    }
+
+    private static SegmentationDescriptor parseSegmentation(byte[] s, int at, int end) {
+        // identifier, which should read "CUEI"; a descriptor claiming this tag
+        // under another authority is not one of these.
+        if (at + 4 > end) {
+            return null;
+        }
+        int identifier = ((s[at] & 0xFF) << 24) | ((s[at + 1] & 0xFF) << 16)
+                | ((s[at + 2] & 0xFF) << 8) | (s[at + 3] & 0xFF);
+        if (identifier != SegmentationDescriptor.IDENTIFIER_CUEI) {
+            return null;
+        }
+        at += 4;
+
+        if (at + 5 > end) {
+            return null;
+        }
+        long eventId = ((long) (s[at] & 0xFF) << 24) | ((s[at + 1] & 0xFF) << 16)
+                | ((s[at + 2] & 0xFF) << 8) | (s[at + 3] & 0xFF);
+        at += 4;
+        boolean cancelled = (s[at] & 0x80) != 0;
+        at++;
+        if (cancelled) {
+            return new SegmentationDescriptor(eventId, true, SegmentationType.NOT_INDICATED,
+                    -1, 0, EMPTY, 0, 0, false, true, false, true);
+        }
+        if (at >= end) {
+            return null;
+        }
+
+        boolean programSegmentation = (s[at] & 0x80) != 0;
+        boolean hasDuration = (s[at] & 0x40) != 0;
+        boolean notRestricted = (s[at] & 0x20) != 0;
+        // On the wire these say what is *allowed*; no_regional_blackout is
+        // inverted here so that every flag reads as a restriction.
+        boolean webDelivery = notRestricted || (s[at] & 0x10) != 0;
+        boolean regionalBlackout = !notRestricted && (s[at] & 0x08) == 0;
+        boolean archiveAllowed = notRestricted || (s[at] & 0x04) != 0;
+        at++;
+
+        if (!programSegmentation) {
+            // Per-component offsets, which this library does not read. Stepped
+            // over so the fields after them still line up.
+            if (at >= end) {
+                return null;
+            }
+            int components = s[at] & 0xFF;
+            at += 1 + components * 6;
+        }
+
+        long duration = -1;
+        if (hasDuration) {
+            if (at + 5 > end) {
+                return null;
+            }
+            duration = ((long) (s[at] & 0xFF) << 32) | ((long) (s[at + 1] & 0xFF) << 24)
+                    | ((long) (s[at + 2] & 0xFF) << 16) | ((long) (s[at + 3] & 0xFF) << 8)
+                    | (s[at + 4] & 0xFF);
+            at += 5;
+        }
+
+        if (at + 2 > end) {
+            return null;
+        }
+        int upidType = s[at] & 0xFF;
+        int upidLength = s[at + 1] & 0xFF;
+        at += 2;
+        if (at + upidLength > end) {
+            return null;
+        }
+        byte[] upid = upidLength == 0 ? EMPTY : Arrays.copyOfRange(s, at, at + upidLength);
+        at += upidLength;
+
+        if (at + 3 > end) {
+            return null;
+        }
+        SegmentationType type = SegmentationType.of(s[at] & 0xFF);
+        int segmentNum = s[at + 1] & 0xFF;
+        int segmentsExpected = s[at + 2] & 0xFF;
+
+        return new SegmentationDescriptor(eventId, false, type, duration, upidType, upid,
+                segmentNum, segmentsExpected, !notRestricted, webDelivery, regionalBlackout,
+                archiveAllowed);
     }
 
     private static SpliceInsert parseInsert(byte[] s, int at, int end) {

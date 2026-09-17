@@ -40,13 +40,18 @@ import static org.assertj.core.api.Assertions.within;
  * <p>{@code splice.ts} is seven seconds of CBR, carrying on PID 500:
  *
  * <ul>
- *   <li>event 1001, out of network at PTS 403,200, lasting two seconds</li>
- *   <li>event 1002, back into network at PTS 583,200</li>
- *   <li>a {@code time_signal} at PTS 673,200</li>
+ *   <li>{@code splice_insert} 1001, out of network at PTS 403,200, lasting two seconds</li>
+ *   <li>{@code time_signal} at PTS 493,200 with a Provider Placement Opportunity
+ *       Start, two seconds long, carrying an Ad-ID and forbidding web delivery</li>
+ *   <li>{@code splice_insert} 1002, back into network at PTS 583,200</li>
+ *   <li>{@code time_signal} at PTS 628,200 with the matching Placement Opportunity End</li>
+ *   <li>a bare {@code time_signal} at PTS 673,200, carrying no descriptor</li>
  * </ul>
  *
  * <p>Each is sent twice, which is the muxer's default redundancy rather than an
- * accident of the fixture.
+ * accident of the fixture. The two styles sit side by side deliberately: the
+ * older {@code splice_insert} and the modern {@code time_signal} with a
+ * segmentation descriptor beside it.
  */
 class SpliceMonitorTest {
 
@@ -102,12 +107,12 @@ class SpliceMonitorTest {
                 .contains("SCTE-35");
     }
 
-    /** Six sections: three events, each sent twice. */
+    /** Ten sections: five events, each sent twice. */
     @Test
     void everySectionIsReadAndNoneIsUnreadable() throws IOException {
         List<SpliceEvent> events = eventsOf("/splice.ts");
 
-        assertThat(events).hasSize(6);
+        assertThat(events).as("five events, each sent twice").hasSize(10);
         assertThat(events).allSatisfy(event -> {
             assertThat(event.pid()).isEqualTo(SPLICE_PID);
             assertThat(event.section().encrypted()).isFalse();
@@ -158,6 +163,7 @@ class SpliceMonitorTest {
         SpliceInfoSection signal = eventsOf("/splice.ts").stream()
                 .map(SpliceEvent::section)
                 .filter(section -> section.commandType() == SpliceCommandType.TIME_SIGNAL)
+                .filter(section -> section.segmentations().isEmpty())
                 .findFirst()
                 .orElseThrow();
 
@@ -221,8 +227,93 @@ class SpliceMonitorTest {
 
         assertThat(lines).containsExactly(
                 "event 1001 out for 2.0s",
+                "Provider Placement Opportunity Start [ABCD0123456H] for 2.0s",
                 "event 1002 in",
+                "Provider Placement Opportunity End [ABCD0123456H]",
                 "time_signal");
+    }
+
+    /**
+     * The descriptor is what gives a {@code time_signal} its meaning.
+     *
+     * <p>Every figure here was read back by TSDuck from the same bytes.
+     */
+    @Test
+    void theSegmentationDescriptorCarriesTheMeaning() throws IOException {
+        SegmentationDescriptor start = eventsOf("/splice.ts").stream()
+                .map(SpliceEvent::section)
+                .map(SpliceInfoSection::segmentation)
+                .filter(segmentation -> segmentation != null
+                        && segmentation.type() == SegmentationType.PROVIDER_PLACEMENT_OPPORTUNITY_START)
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(start.eventId()).isEqualTo(2001);
+        assertThat(start.cancelled()).isFalse();
+        assertThat(start.durationSeconds()).isCloseTo(2.0, within(0.001));
+        assertThat(start.segmentNum()).isEqualTo(1);
+        assertThat(start.segmentsExpected()).isEqualTo(1);
+        assertThat(start.type().isStart()).isTrue();
+        assertThat(start.type().isPlacementOpportunity())
+                .as("this is the type a downstream ad server acts on")
+                .isTrue();
+    }
+
+    /** An Ad-ID is ASCII on the wire, and comes back as text rather than hex. */
+    @Test
+    void anAdIdUpidReadsAsText() throws IOException {
+        SegmentationDescriptor start = eventsOf("/splice.ts").stream()
+                .map(SpliceEvent::section)
+                .map(SpliceInfoSection::segmentation)
+                .filter(segmentation -> segmentation != null && !segmentation.cancelled())
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(start.upidType()).as("Ad-ID").isEqualTo(0x03);
+        assertThat(start.upidText()).isEqualTo("ABCD0123456H");
+    }
+
+    /**
+     * Delivery restrictions, stated positively.
+     *
+     * <p>The fixture forbids web delivery and allows everything else. On the wire
+     * {@code no_regional_blackout_flag} is set, meaning no blackout applies, and
+     * this reports {@code regionalBlackout} false — the same fact the other way
+     * up, so that every flag here reads as a restriction.
+     */
+    @Test
+    void deliveryRestrictionsAreReportedAsRestrictions() throws IOException {
+        SegmentationDescriptor start = eventsOf("/splice.ts").stream()
+                .map(SpliceEvent::section)
+                .map(SpliceInfoSection::segmentation)
+                .filter(segmentation -> segmentation != null && !segmentation.cancelled())
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(start.deliveryRestricted()).isTrue();
+        assertThat(start.webDeliveryAllowed()).as("the fixture forbids it").isFalse();
+        assertThat(start.regionalBlackout()).isFalse();
+        assertThat(start.archiveAllowed()).isTrue();
+    }
+
+    /** Start and end share an event id, which is how a break is matched to its return. */
+    @Test
+    void aPlacementOpportunityPairsByEventId() throws IOException {
+        List<SegmentationDescriptor> pair = eventsOf("/splice.ts").stream()
+                .map(SpliceEvent::section)
+                .map(SpliceInfoSection::segmentation)
+                .filter(segmentation -> segmentation != null && segmentation.eventId() == 2001)
+                .distinct()
+                .toList();
+
+        assertThat(pair).extracting(SegmentationDescriptor::type)
+                .containsExactly(SegmentationType.PROVIDER_PLACEMENT_OPPORTUNITY_START,
+                        SegmentationType.PROVIDER_PLACEMENT_OPPORTUNITY_END);
+        assertThat(pair.get(0).type().isStart()).isTrue();
+        assertThat(pair.get(1).type().isStart()).isFalse();
+        assertThat(pair.get(1).hasDuration())
+                .as("the end carries no duration; the start already said how long")
+                .isFalse();
     }
 
     /** A stream with no splice information yields nothing, and says so quietly. */

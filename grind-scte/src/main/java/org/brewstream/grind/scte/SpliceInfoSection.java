@@ -39,6 +39,10 @@ package org.brewstream.grind.scte;
  * @param spliceInsert    the parsed command when it is a {@code splice_insert}, else null
  * @param timeSignal      the time named by a {@code time_signal}, in 90 kHz units,
  *                        or -1 when this is not one or it carries no time
+ * @param segmentations   the segmentation descriptors beside the command, in the order
+ *                        the section carries them. Usually empty or a single entry, and
+ *                        where a modern splice keeps its meaning — the command names a
+ *                        moment, these say what the moment is
  */
 public record SpliceInfoSection(
         SpliceCommandType commandType,
@@ -46,7 +50,13 @@ public record SpliceInfoSection(
         int tier,
         boolean encrypted,
         SpliceInsert spliceInsert,
-        long timeSignal) {
+        long timeSignal,
+        java.util.List<SegmentationDescriptor> segmentations) {
+
+    /** The first segmentation descriptor, or null when the section carries none. */
+    public SegmentationDescriptor segmentation() {
+        return segmentations.isEmpty() ? null : segmentations.get(0);
+    }
 
     /** The table id every splice information section carries. */
     public static final int TABLE_ID = 0xFC;

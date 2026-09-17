@@ -71,6 +71,12 @@ public record SpliceEvent(int pid, SpliceInfoSection section, long arrivalPcr, l
         if (section.encrypted()) {
             return "encrypted " + section.commandType().label();
         }
+        // A segmentation descriptor says what the moment means, where the command
+        // only says when it is - so when one is present it is the better label.
+        SegmentationDescriptor segmentation = section.segmentation();
+        if (segmentation != null) {
+            return segmentation.describe();
+        }
         SpliceInsert insert = section.spliceInsert();
         if (insert == null) {
             return section.commandType().label();
