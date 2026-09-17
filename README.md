@@ -37,7 +37,7 @@ includeBuild '../grind'
 
 // build.gradle
 dependencies {
-    implementation 'io.github.brewstream:grind'
+    implementation 'io.github.brewstream:grind-core'
     implementation 'io.github.brewstream:grind-netty'   // only if you want the handlers
 }
 ```

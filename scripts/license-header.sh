@@ -59,7 +59,7 @@ while IFS= read -r -d '' file; do
     printf '%s\n\n%s' "$HEADER" "$(cat "$file")" > "$file.licensed"
     mv "$file.licensed" "$file"
     added=$((added + 1))
-done < <(find core/src netty/src -name '*.java' -print0)
+done < <(find grind-core/src grind-netty/src -name '*.java' -print0)
 
 if $CHECK_ONLY; then
     if [[ ${#missing[@]} -gt 0 ]]; then

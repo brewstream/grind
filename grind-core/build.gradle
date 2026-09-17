@@ -12,5 +12,5 @@ mavenPublishing {
 }
 
 base {
-    archivesName = 'grind'
+    archivesName = 'grind-core'
 }

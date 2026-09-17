@@ -1,7 +1,7 @@
 description = 'Netty handlers for Grind: MPEG-TS decoding and health monitoring in a pipeline'
 
 dependencies {
-    api project(':core')
+    api project(':grind-core')
     // api, not implementation: ByteBuf and ChannelHandler are in this module's
     // public API, so a consumer that only got them transitively at runtime could
     // not compile against it.
@@ -32,6 +32,6 @@ base {
 // stream, one place to regenerate it, no chance of the two drifting apart.
 sourceSets {
     test {
-        resources.srcDir project(':core').file('src/test/resources')
+        resources.srcDir project(':grind-core').file('src/test/resources')
     }
 }
