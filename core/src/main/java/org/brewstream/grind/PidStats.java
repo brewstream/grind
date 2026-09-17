@@ -33,6 +33,17 @@ package org.brewstream.grind;
  * @param pcrCount            how many PCRs this PID has carried
  * @param pcrDiscontinuities  unannounced jumps in that clock. TR 101 290
  *                            <b>PCR_discontinuity_indicator_error</b>, Priority 2
+ * @param pcrRepetitionErrors intervals between consecutive PCRs longer than the 40ms ETSI
+ *                            TR 101 290 allows. <b>Priority 2 PCR_repetition_error.</b> A
+ *                            conformance measure, not a damage one: such a stream decodes
+ *                            perfectly, the receiver's clock recovery simply has less to
+ *                            work with. Deliberately excluded from errored seconds and from
+ *                            {@link TsStreamStats#isHealthy()} for that reason — ffmpeg
+ *                            emits a PCR every 80ms by default, so folding this in would
+ *                            report most working streams as broken throughout
+ * @param maxPcrInterval    the widest gap seen between consecutive PCRs, in 27 MHz units,
+ *                          or 0 before two have arrived. More useful than the count: it
+ *                          says by how much rather than how often
  * @param pesPackets        PES packets started on this PID. One frame per packet for video,
  *                          but audio commonly packs many frames into one, so this is a frame
  *                          count only for video and undercounts audio badly
@@ -66,6 +77,8 @@ public record PidStats(
         long lastPcr,
         long pcrCount,
         long pcrDiscontinuities,
+        long pcrRepetitionErrors,
+        long maxPcrInterval,
         long pesPackets,
         long lastPts,
         long lastDts,
@@ -74,6 +87,11 @@ public record PidStats(
         long packetsSinceRandomAccess,
         long erroredSeconds,
         long damagedGops) {
+
+    /** The widest gap between consecutive PCRs in milliseconds, or 0 before two have arrived. */
+    public double maxPcrIntervalMillis() {
+        return maxPcrInterval / (AdaptationField.PCR_RATE_HZ / 1000.0);
+    }
 
     /** Whether this PID carries the program clock. */
     public boolean carriesPcr() {

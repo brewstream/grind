@@ -52,6 +52,13 @@ import java.util.List;
  * @param crcErrors        PSI sections discarded for a bad checksum. TR 101 290
  *                         <b>CRC_error</b>, Priority 2 — worse than loss on a video PID,
  *                         because it can leave the stream's structure unknown
+ * @param pcrRepetitionErrors intervals between consecutive PCRs longer than TR 101 290's
+ *                         40ms, summed across every PID carrying one. <b>Priority 2
+ *                         PCR_repetition_error.</b> Counted but deliberately kept out of
+ *                         {@link #isHealthy()} and out of errored seconds: it is a
+ *                         conformance measure rather than evidence anything was lost, and
+ *                         a muxer spacing PCRs at 80ms would otherwise read as broken for
+ *                         every second of a perfectly good stream
  * @param erroredSeconds   seconds of stream time containing at least one error. <b>The figure
  *                         a broadcast probe reports</b>, and the one that answers "for how long
  *                         was this broken" rather than "how many packets went missing".
@@ -75,6 +82,7 @@ public record TsStreamStats(
         long syncLosses,
         long crcErrors,
         long pcrDiscontinuities,
+        long pcrRepetitionErrors,
         long erroredSeconds,
         long observedSeconds,
         ProgramMap programs,
@@ -97,6 +105,11 @@ public record TsStreamStats(
      * <p>Every condition here also marks an errored second, and deliberately so:
      * a stream reporting healthy beside a non-zero errored-second count would be
      * contradicting itself on the same panel.
+     *
+     * <p>{@code pcrRepetitionErrors} is the deliberate exception, and the reason
+     * is the distinction this method turns on: these count conditions under which
+     * <em>something was lost or corrupted</em>. A PCR arriving later than the
+     * standard allows loses nothing. It is worth reporting, and it is not this.
      */
     public boolean isHealthy() {
         return continuityErrors == 0 && transportErrors == 0 && syncLosses == 0

@@ -162,13 +162,33 @@ decodable", Priority 2 is "decodable but wrong", Priority 3 is optional.
 | `CRC_error` | 2 | `crcErrors()` |
 | `PCR_discontinuity_indicator_error` | 2 | `pcrDiscontinuities()` |
 | `PID_error` — a referenced PID never appears | 3 | derivable: the PMT lists it, `stats.pid()` returns `null`. No timer |
-| `PCR_repetition_error` (40ms), `PCR_accuracy_error` (±500ns) | 2 | **not implemented** |
+| `PCR_repetition_error` (40ms) | 2 | `pcrRepetitionErrors()`, `maxPcrIntervalMillis()` |
+| `PCR_accuracy_error` (±500ns) | 2 | **not implemented** |
 | `PTS_error` — PTS at least every 700ms | 2 | **not implemented** |
 | `CAT_error`, scrambling checks | 2 | **not implemented** |
 
 The unimplemented ones are all *timing* checks, and they share a reason: they
 need a rate model rather than a parser. Phase 2's PTS-to-PCR skew work is where
 that starts.
+
+### Conformance is not damage
+
+`PCR_repetition_error` is counted but does **not** mark an errored second and
+does **not** clear `isHealthy()`. That is not an oversight, and the reason is
+worth knowing before comparing Grind's output against another probe's.
+
+Every fixture in this project breaches the 40ms limit on every single interval:
+ffmpeg's muxer spaces PCRs 80ms apart by default, exactly twice the limit, and
+those streams are perfectly watchable. A stream whose PCRs are late has lost
+nothing — the receiver's clock recovery simply has less to work with, and its
+tolerance for jitter narrows. Folding that into errored seconds would report an
+ordinary, working stream as broken for every second of its duration, and the
+figure that was supposed to mean "for how long was this broken" would come to
+mean "for how long was this stream muxed by ffmpeg".
+
+So the health figures answer *was anything lost or corrupted*, and conformance
+checks are reported separately. Probes differ on this, which is exactly why it is
+written down rather than left to be inferred.
 
 **Errored seconds** is reported alongside, per PID and per stream: seconds of
 stream time containing at least one of the above, counted once however many the
@@ -238,7 +258,9 @@ the work is comparison rather than new parsing. In order:
   programs need not share a time base. Errored seconds are now counted against
   the erring PID's *own* program clock. See the note below on why no fixture
   caught this.
-- **`PCR_repetition_error`** (P2) — a PCR at least every 40ms.
+- **`PCR_repetition_error`** (P2) — **done.** A PCR at least every 40ms, counted per
+  PID with the widest interval kept alongside. Deliberately excluded from errored
+  seconds and from `isHealthy()`; see below.
 - **`PCR_accuracy_error`** (P2) — ±500ns. Needs a rate model, so it is the
   hardest of these and may land last.
 - **`PTS_error`** (P2) — a PTS at least every 700ms.

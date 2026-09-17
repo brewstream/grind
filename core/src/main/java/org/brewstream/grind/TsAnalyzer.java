@@ -53,6 +53,21 @@ public final class TsAnalyzer {
      */
     private static final long PCR_DISCONTINUITY_THRESHOLD = 27_000_000L / 10;
 
+    /**
+     * The longest gap between consecutive PCRs that ETSI TR 101 290 allows: 40ms.
+     *
+     * <p>A stream exceeding it is non-conformant but perfectly decodable — the
+     * receiver's clock recovery simply has less to work with, and its tolerance
+     * for jitter narrows. That is why a breach is counted but does <em>not</em>
+     * mark an errored second or clear {@code isHealthy()}: those say a viewer saw
+     * something wrong, and this does not.
+     *
+     * <p>The distinction is not academic. ffmpeg's muxer emits a PCR every 80ms
+     * by default, exactly twice this limit, so every fixture in this project
+     * breaches it on every interval. Folding that into errored seconds would
+     * report a clean stream as broken for its entire duration.
+     */
+    private static final long PCR_REPETITION_LIMIT = 27_000_000L * 40 / 1000;
 
     /**
      * The full span of the PCR before it wraps: the base is 33 bits of 90 kHz,
@@ -78,6 +93,7 @@ public final class TsAnalyzer {
     private long pesPackets;
     private long syncLosses;
     private long pcrDiscontinuities;
+    private long pcrRepetitionErrors;
 
     /**
      * One clock per PID that carries a PCR, which in practice means one per
@@ -406,12 +422,19 @@ public final class TsAnalyzer {
                 delta += PCR_WRAP_MAGNITUDE;
             }
             boolean announced = packet.adaptationField() != null && packet.adaptationField().discontinuity();
-            if (!announced && (delta < 0 || delta > PCR_DISCONTINUITY_THRESHOLD)) {
+            boolean discontinuous = !announced && (delta < 0 || delta > PCR_DISCONTINUITY_THRESHOLD);
+            if (discontinuous) {
                 long previous = state.lastPcr;
                 state.pcrDiscontinuities++;
                 pcrDiscontinuities++;
                 markErroredSecond(state);
                 fire(listener -> listener.onPcrDiscontinuity(packet.pid(), previous, pcr));
+            } else if (!announced) {
+                // Only across a clock that stayed continuous. After a jump the
+                // interval describes the jump rather than the muxer's spacing,
+                // and reporting one event as both a discontinuity and a late PCR
+                // counts a single fault twice.
+                trackPcrRepetition(packet.pid(), state, delta);
             }
         }
         state.lastPcr = pcr;
@@ -476,6 +499,28 @@ public final class TsAnalyzer {
             }
         }
         clockByPid = Map.copyOf(rebound);
+    }
+
+    /**
+     * Notes how far apart two consecutive PCRs were, and whether that breached
+     * TR 101 290's limit.
+     *
+     * <p>The widest interval is kept alongside the count because it is the more
+     * useful of the two. A count says a stream is non-conformant; the widest gap
+     * says by how much, which is what decides whether a receiver will cope.
+     */
+    private void trackPcrRepetition(int pid, PidState state, long delta) {
+        if (delta <= 0) {
+            return; // two PCRs in one packet's worth of time, or none passed
+        }
+        if (delta > state.maxPcrInterval) {
+            state.maxPcrInterval = delta;
+        }
+        if (delta > PCR_REPETITION_LIMIT) {
+            state.pcrRepetitionErrors++;
+            pcrRepetitionErrors++;
+            fire(listener -> listener.onPcrRepetitionError(pid, delta));
+        }
     }
 
     /**
@@ -567,6 +612,7 @@ public final class TsAnalyzer {
             pids.add(new PidStats(state.pid, state.packets, state.bytes, state.continuityErrors,
                     state.packetsLost, state.transportErrors, state.duplicates, state.scrambled,
                     state.lastPcr, state.pcrCount, state.pcrDiscontinuities,
+                    state.pcrRepetitionErrors, state.maxPcrInterval,
                     state.pesPackets, state.lastPts, state.lastDts, state.streamId,
                     state.randomAccessPoints, state.packetsSinceRandomAccess,
                     state.erroredSeconds, state.damagedGops));
@@ -578,7 +624,7 @@ public final class TsAnalyzer {
         long observedSeconds = referenceClock == null ? 0 : referenceClock.observedSeconds();
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
                 transportErrors, duplicates, pesPackets, syncLosses, crcFailures,
-                pcrDiscontinuities, erroredSeconds, observedSeconds, programMap,
+                pcrDiscontinuities, pcrRepetitionErrors, erroredSeconds, observedSeconds, programMap,
                 List.copyOf(pids));
     }
 
@@ -610,6 +656,8 @@ public final class TsAnalyzer {
         private long lastPcr = -1;
         private long pcrCount;
         private long pcrDiscontinuities;
+        private long pcrRepetitionErrors;
+        private long maxPcrInterval;
         private long randomAccessPoints;
         private long packetsSinceRandomAccess = -1;
         private long erroredSeconds;

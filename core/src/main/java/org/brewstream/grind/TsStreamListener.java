@@ -71,6 +71,19 @@ public interface TsStreamListener {
      * because a stream that silently becomes encrypted looks identical to one
      * that has become corrupt, until you check this.
      */
+    /**
+     * A gap between consecutive PCRs longer than TR 101 290's 40ms limit.
+     *
+     * <p>Fired on a stream that is non-conformant but not damaged, so it is
+     * usually worth sampling rather than logging: a muxer spacing PCRs at 80ms
+     * fires this on every interval, several times a second, for the life of a
+     * perfectly watchable stream.
+     *
+     * @param interval the gap in 27 MHz units; divide by 27,000 for milliseconds
+     */
+    default void onPcrRepetitionError(int pid, long interval) {
+    }
+
     default void onScramblingChanged(int pid, boolean scrambled) {
     }
 
