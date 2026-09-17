@@ -1,0 +1,29 @@
+description = 'SCTE-35 splice information for Grind: reading ad markers from a transport stream'
+
+dependencies {
+    // api, not implementation: TsPacket, ProgramMap and TableSection all appear
+    // in this module's public API, so a consumer that only got them transitively
+    // at runtime could not compile against it. The same mistake grind-netty made
+    // with netty-codec, avoided here rather than rediscovered.
+    api project(':grind-core')
+}
+
+mavenPublishing {
+    coordinates(project.group.toString(), 'grind-scte', project.version.toString())
+    pom {
+        name = 'Grind SCTE-35'
+        description = project.description
+    }
+}
+
+base {
+    archivesName = 'grind-scte'
+}
+
+// Shares core's fixtures rather than duplicating binary into git, the same way
+// grind-netty does.
+sourceSets {
+    test {
+        resources.srcDir project(':grind-core').file('src/test/resources')
+    }
+}

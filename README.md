@@ -28,7 +28,7 @@ Two artifacts:
 |---|---|---|
 | `grind-core` | parser and analyzer | none |
 | `grind-netty` | pipeline handlers | Netty |
-| `grind-scte35` | splice information (planned) | `grind-core` |
+| `grind-scte` | SCTE-35 splice information | `grind-core` |
 
 **Not yet published.** Consume as a Gradle composite build until a release is cut:
 
@@ -250,7 +250,7 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | **1b — Clocks and timing** | Per-program clocks (**done**); PCR repetition and accuracy; PTS intervals and PTS-to-PCR skew; PAT/PMT repetition | **in progress** |
 | **2 — Elementary streams** | PES payload reassembly into access units; frame boundaries from PES starts | **parked**, see below |
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
-| **SCTE-35** | splice information, read only, in `grind-scte35` | next, see below |
+| **SCTE-35** | splice information, read only, in `grind-scte` | **in progress**, see below |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
 
@@ -292,6 +292,10 @@ the work is comparison rather than new parsing. In order:
 
 ### SCTE-35: scope, and why it is its own module
 
+**Status:** sections, `splice_insert` and `time_signal` are read, with an event
+view carrying both the arrival and the splice time. Segmentation descriptors are
+the next piece.
+
 **Read only.** Grind reports what splice information a stream carries. It does
 not create, modify or remove it. Injection is discussed at the end of this
 section and is deliberately not planned.
@@ -305,7 +309,7 @@ assembly and CRC-32 they need.
 
 #### Its own module
 
-`grind-scte35`, depending only on `grind-core`'s published API.
+`grind-scte`, depending only on `grind-core`'s published API.
 
 This is not the usual reason for a module. `grind-netty` exists to isolate a
 dependency, and SCTE-35 adds none — so on that test alone it would belong in
@@ -326,28 +330,33 @@ in `grind-core`.
 
 Roughly in order, each piece useful on its own:
 
-1. **Find the PIDs.** Streams the PMT declares as type `0x86`. `StreamType.SCTE35`
-   already exists, so Grind labels these tracks today. A conforming PMT also
+1. **Find the PIDs.** Streams the PMT declares as type `0x86` — **done**.
+   `StreamType.SCTE35` already existed, so Grind labelled these tracks before
+   this module was written. A conforming PMT also
    carries a `CUEI` registration descriptor; descriptor parsing is phase 3, so
    stream type alone is the starting point and the descriptor is a later
    confirmation rather than a precondition.
-2. **Assemble the sections.** `SectionAssembler` already does this, including the
-   CRC-32 these share with the PAT and PMT. Note that `TsAnalyzer` currently
-   routes only PAT and PMT PIDs to an assembler, so this module needs its own
-   path from packets to sections rather than a hook into that one.
+2. **Assemble the sections** — **done**, and it needed a change in
+   `grind-core`. Splice sections are *short form*, and the assembler discarded
+   short sections outright: "None of the tables this library reads use them."
+   They now come through, and — unlike a long section, whose header is stripped —
+   a short section's body is the **whole section including its header**. SCTE 35
+   computes its CRC over itself, and reconstructing those header bytes to check it
+   would mean guessing the flag bits they carry.
 3. **Parse `splice_info_section`** — table id `0xFC`: `pts_adjustment`, tier, the
    encryption flag, and the command type. **An encrypted section must be reported
    as unreadable rather than parsed**, or the fields come out as plausible
    nonsense.
-4. **Commands.** `splice_insert` and `time_signal` carry real-world traffic and
-   come first. `splice_null`, `splice_schedule`, `bandwidth_reservation` and
+4. **Commands** — **done** for the two that carry real-world traffic,
+   `splice_insert` and `time_signal`. `splice_null`, `splice_schedule`, `bandwidth_reservation` and
    private commands should be recognised and reported by name without being
    parsed, so an unfamiliar stream is described rather than ignored.
 5. **`segmentation_descriptor`** (tag `0x02`). Where modern broadcasters put the
    meaning — event id, segmentation type, UPID, duration. The largest single
    piece, and worth its own pass.
-6. **The event view.** Each splice as a record carrying both times: when the
-   section arrived, and when the splice fires. See below.
+6. **The event view** — **done**. `SpliceEvent` carries both times and derives
+   the pre-roll between them, which reads negative when a warning arrived too
+   late to act on.
 
 #### Three things that are easy to get wrong
 

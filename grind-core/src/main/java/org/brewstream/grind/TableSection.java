@@ -45,6 +45,19 @@ public record TableSection(
         int lastSectionNumber,
         byte[] body) {
 
+    /**
+     * Table id, then two bytes of flags and length. All a short section has.
+     *
+     * <p>A section this short carries no version and no section numbering, so
+     * those components read 0 and {@code current} reads true — there is no
+     * "next" version of a table that cannot be versioned.
+     *
+     * <p><b>A short section's {@code body} includes this header</b>, where a long
+     * section's does not. It is the only way a table that checksums itself, as
+     * SCTE 35 does, can verify one.
+     */
+    public static final int SHORT_HEADER_LENGTH = 3;
+
     /** Program Association Table — always on PID 0. */
     public static final int TABLE_ID_PAT = 0x00;
 

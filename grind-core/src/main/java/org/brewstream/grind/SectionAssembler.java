@@ -175,10 +175,24 @@ public final class SectionAssembler {
         int tableId = pending[0] & 0xFF;
         boolean longSection = (pending[1] & 0x80) != 0;
         if (!longSection) {
-            // A short section carries no CRC, version or section numbering. None
-            // of the tables this library reads use them, so it is skipped rather
-            // than guessed at.
-            return null;
+            // A short section carries no version or section numbering, and by the
+            // base standard no CRC either. It is emitted whole - header stripped,
+            // nothing else removed - because whether the remainder ends in a
+            // checksum is the table's business, not the assembler's.
+            //
+            // SCTE 35 is the case that forces this: its splice sections are
+            // short-form yet do carry a CRC-32, so validating one here would be
+            // wrong for short sections in general, and stripping four bytes would
+            // corrupt the ones that have no CRC at all.
+            // Handed over whole, header included, unlike a long section whose
+            // header this strips. Two reasons, and the second is the load-bearing
+            // one: there is no structure here worth interpreting, and a table
+            // that computes a checksum over itself - SCTE 35 does - cannot verify
+            // it from the body alone. Reconstructing those header bytes to check
+            // would mean guessing the flag bits they carry.
+            sectionsCompleted++;
+            return new TableSection(tableId, 0, 0, true, 0, 0,
+                    Arrays.copyOfRange(pending, 0, expectedLength));
         }
         if (!Crc32Mpeg.isValid(pending, 0, expectedLength)) {
             crcFailures++;
