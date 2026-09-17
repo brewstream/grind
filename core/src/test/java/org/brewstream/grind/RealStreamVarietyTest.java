@@ -141,7 +141,7 @@ class RealStreamVarietyTest {
         TsStreamStats stats = analyze("/bframes.ts").stats();
 
         assertThat(stats.isHealthy()).isTrue();
-        assertThat(stats.tableCrcFailures()).isZero();
+        assertThat(stats.crcErrors()).isZero();
     }
 
     // --- multiprogram.ts: two programs, two PMTs
@@ -200,7 +200,7 @@ class RealStreamVarietyTest {
     void bothPmtPidsAreAssembledAndNeitherIsMistakenForTheOther() throws IOException {
         TsAnalyzer analyzer = analyze("/multiprogram.ts");
 
-        assertThat(analyzer.stats().tableCrcFailures()).isZero();
+        assertThat(analyzer.stats().crcErrors()).isZero();
         assertThat(analyzer.programs().programs().get(1).streams().get(0).pid()).isEqualTo(0x0100);
         assertThat(analyzer.programs().programs().get(2).streams().get(0).pid()).isEqualTo(0x0102);
     }

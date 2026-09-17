@@ -23,32 +23,36 @@ package org.brewstream.grind;
  * @param pid                 the PID these figures describe
  * @param packets             transport packets seen
  * @param bytes               payload bytes seen, excluding headers and adaptation fields
- * @param continuityErrors    counter jumps that were not announced as discontinuities
+ * @param continuityErrors    counter jumps that were not announced as discontinuities.
+ *                            TR 101 290 <b>Continuity_count_error</b>, Priority 1
  * @param packetsLost         how many packets those jumps account for
- * @param transportErrors     packets an upstream demodulator flagged as known corrupt
+ * @param transportErrors     packets an upstream demodulator flagged as known corrupt.
+ *                            TR 101 290 <b>Transport_error</b>, Priority 2
  * @param scrambled           whether the PID was carrying scrambled payload at snapshot time
  * @param lastPcr             the most recent PCR in 27 MHz units, or -1 if this PID carries none
  * @param pcrCount            how many PCRs this PID has carried
- * @param pcrDiscontinuities  unannounced jumps in that clock
+ * @param pcrDiscontinuities  unannounced jumps in that clock. TR 101 290
+ *                            <b>PCR_discontinuity_indicator_error</b>, Priority 2
  * @param pesPackets        PES packets started on this PID. One frame per packet for video,
  *                          but audio commonly packs many frames into one, so this is a frame
  *                          count only for video and undercounts audio badly
  * @param lastPts           the most recent presentation timestamp in 90 kHz units, or -1
  * @param lastDts           the most recent decode timestamp, or -1 when frames are not reordered
  * @param streamId          the PES stream id last seen, or -1 if this PID carries no PES
- * @param randomAccessPoints packets flagged as somewhere a decoder could start — keyframes,
- *                          in practice
+ * @param randomAccessPoints packets flagged as somewhere a decoder could start — the start of
+ *                          a GOP, for video
  * @param packetsSinceRandomAccess how far past the most recent one we are, or -1 if none has
  *                          been seen yet
- * @param damagedIntervals  spans between random-access points that contained at least one
- *                          continuity error. <b>This is the figure closest to what a viewer
- *                          actually saw</b>: everything in a span depends on the frame that
- *                          begins it, so a gap anywhere in one damages all of it, and five
- *                          packets lost inside a single span is one glitch rather than five.
- *                          <b>Read this on video, not audio.</b> Every AAC frame is
- *                          independently decodable, so nearly every audio packet is flagged as
- *                          a random-access point and damage does not propagate — a damaged
- *                          audio span means a click, not a second of corruption
+ * @param damagedGops       groups of pictures that contained at least one error, counted
+ *                          once per GOP however many it took. Not a TR 101 290 measure —
+ *                          that standard counts errors and seconds, not media structure —
+ *                          but the figure closest to what a viewer saw, since everything in
+ *                          a GOP depends on the frame that begins it. Meaningful on video;
+ *                          on audio nearly every frame is a random-access point, so this
+ *                          degenerates into an error count
+ * @param erroredSeconds    seconds of stream time in which this PID had at least one error.
+ *                          The per-PID form of the figure a broadcast probe reports, counted
+ *                          once per second however many errors it holds
  */
 public record PidStats(
         int pid,
@@ -68,7 +72,8 @@ public record PidStats(
         int streamId,
         long randomAccessPoints,
         long packetsSinceRandomAccess,
-        long damagedIntervals) {
+        long erroredSeconds,
+        long damagedGops) {
 
     /** Whether this PID carries the program clock. */
     public boolean carriesPcr() {
@@ -76,19 +81,28 @@ public record PidStats(
     }
 
     /**
-     * Average packets between random-access points — the size of a span, and so
-     * how long damage to one persists. Zero when none has been seen.
+     * Average packets per GOP — the stretch between two points a decoder could
+     * start from, and so how long damage to one persists before a keyframe
+     * resets it. Zero when no random-access point has been seen.
+     *
+     * <p>Meaningful for video. Nearly every audio frame is independently
+     * decodable and therefore its own random-access point, so this reads as a
+     * very short interval there and carries no comparable meaning.
      */
-    public double averageRandomAccessInterval() {
-        return randomAccessPoints == 0 ? 0 : (double) packets / randomAccessPoints;
+    /**
+     * Damaged GOPs as a fraction of those seen, or zero before the first
+     * random-access point.
+     *
+     * <p>Closer to "how much of what was shown was broken" than any packet
+     * figure: a stream losing one percent of packets in a single burst damages
+     * one GOP, while the same one percent spread evenly damages every one.
+     */
+    public double damagedGopRate() {
+        return randomAccessPoints == 0 ? 0.0 : (double) damagedGops / randomAccessPoints;
     }
 
-    /**
-     * Damaged spans as a fraction of all of them. Closer to "how often would a
-     * viewer have noticed" than any packet count.
-     */
-    public double damagedIntervalRate() {
-        return randomAccessPoints == 0 ? 0 : (double) damagedIntervals / randomAccessPoints;
+    public double gopLengthPackets() {
+        return randomAccessPoints == 0 ? 0 : (double) packets / randomAccessPoints;
     }
 
     /** Whether this PID carries an elementary stream, as opposed to tables or stuffing. */

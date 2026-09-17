@@ -25,18 +25,65 @@ import java.util.Arrays;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Tracking where a decoder could start, and whether the span since took damage.
+ * Tracking where a decoder could start, and whether the GOP since took damage.
  *
  * <p>This is the figure closest to what someone watching would actually notice.
  * Everything between two random-access points depends on the frame that begins
- * it, so a gap anywhere in a span damages all of it — five packets lost inside
- * one span is a single glitch, while five spread across five spans is five.
+ * it, so a gap anywhere in a GOP damages all of it — five packets lost inside
+ * one GOP is a single glitch, while five spread across five GOPs is five.
  *
  * <p>Counts are cross-checked by walking the fixtures' bytes directly: {@code
  * bframes.ts} was encoded with {@code -g 12} at 25fps over two seconds, which is
  * about four GOPs, and carries five flagged packets on its video PID.
  */
 class RandomAccessTest {
+
+    /**
+     * A packet flagged corrupt upstream damages its GOP too, not just a
+     * continuity gap.
+     *
+     * <p>Both mean the same thing to a decoder — the bytes for this GOP are not
+     * what the encoder produced — and counting only the gap would understate a
+     * stream whose losses arrive as corruption rather than as absence. Built by
+     * hand because a clean fixture carries no flagged packets.
+     */
+    @Test
+    void aPacketFlaggedCorruptDamagesItsGop() {
+        TsAnalyzer analyzer = new TsAnalyzer();
+
+        analyzer.consume(keyframe(0));
+        assertThat(analyzer.stats().pid(VIDEO_PID).damagedGops()).isZero();
+
+        analyzer.consume(corrupt(1));
+
+        PidStats video = analyzer.stats().pid(VIDEO_PID);
+        assertThat(video.transportErrors()).isEqualTo(1);
+        assertThat(video.damagedGops()).as("the open GOP took damage").isEqualTo(1);
+        assertThat(video.continuityErrors()).as("no gap, only corruption").isZero();
+    }
+
+    /** Damage arriving before any keyframe belongs to no GOP, so it is not attributed. */
+    @Test
+    void corruptionBeforeTheFirstKeyframeDamagesNoGop() {
+        TsAnalyzer analyzer = new TsAnalyzer();
+
+        analyzer.consume(corrupt(0));
+
+        PidStats video = analyzer.stats().pid(VIDEO_PID);
+        assertThat(video.transportErrors()).as("still counted as an error").isEqualTo(1);
+        assertThat(video.damagedGops()).as("but there is no GOP open to damage").isZero();
+    }
+
+    private static TsPacket keyframe(int counter) {
+        return new TsPacket(new byte[TsPacket.LENGTH], false, false, false, VIDEO_PID, 0,
+                AdaptationFieldControl.ADAPTATION_AND_PAYLOAD, counter,
+                new AdaptationField(false, true, false, -1), 12, TsPacket.LENGTH - 12);
+    }
+
+    private static TsPacket corrupt(int counter) {
+        return new TsPacket(new byte[TsPacket.LENGTH], true, false, false, VIDEO_PID, 0,
+                AdaptationFieldControl.PAYLOAD_ONLY, counter, null, 4, TsPacket.LENGTH - 4);
+    }
 
     private static final int VIDEO_PID = 0x0100;
 
@@ -63,29 +110,29 @@ class RandomAccessTest {
         assertThat(video.randomAccessPoints())
                 .as("-g 12 at 25fps over 2s, so roughly four GOPs")
                 .isEqualTo(5);
-        assertThat(video.averageRandomAccessInterval())
+        assertThat(video.gopLengthPackets())
                 .as("packets per span, which is how long damage to one persists")
                 .isBetween(40.0, 60.0);
     }
 
-    /** A clean stream has spans but no damaged ones. */
+    /** A clean stream has GOPs but no damaged ones. */
     @Test
-    void aCleanStreamHasNoDamagedIntervals() throws IOException {
+    void aCleanStreamHasNoDamagedGops() throws IOException {
         PidStats video = analyze("/bframes.ts").stats().pid(VIDEO_PID);
 
-        assertThat(video.damagedIntervals()).isZero();
-        assertThat(video.damagedIntervalRate()).isZero();
+        assertThat(video.damagedGops()).isZero();
+        assertThat(video.damagedGopRate()).isZero();
         assertThat(video.packetsSinceRandomAccess())
                 .as("we are somewhere inside the last span, not before the first")
                 .isNotNegative();
     }
 
     /**
-     * Two gaps inside one span count as one damaged span, not two. A GOP that is
+     * Two gaps inside one GOP count as one damaged GOP, not two. A GOP that is
      * already broken does not become twice as broken.
      */
     @Test
-    void severalGapsInOneSpanCountAsOneDamagedSpan() throws IOException {
+    void severalGapsInOneGopCountAsOneDamagedGop() throws IOException {
         byte[] data = read("/bframes.ts");
         TsAnalyzer analyzer = new TsAnalyzer();
 
@@ -98,8 +145,8 @@ class RandomAccessTest {
                 boolean rai = packet.adaptationField() != null && packet.adaptationField().randomAccess();
                 if (rai) {
                     // Only start dropping after a keyframe has been seen, so the
-                    // damage is attributable to a span rather than to the time
-                    // before any span existed.
+                    // damage is attributable to a GOP rather than to the time
+                    // before any GOP existed.
                     afterFirstKeyframe = true;
                     videoSeen = 0;
                 } else if (afterFirstKeyframe) {
@@ -117,12 +164,12 @@ class RandomAccessTest {
         assertThat(dropped).as("both gaps must have been injected").isEqualTo(2);
         PidStats video = analyzer.stats().pid(VIDEO_PID);
         assertThat(video.continuityErrors()).as("two separate gaps").isEqualTo(2);
-        assertThat(video.damagedIntervals()).as("but one damaged span").isEqualTo(1);
+        assertThat(video.damagedGops()).as("but one damaged GOP").isEqualTo(1);
     }
 
-    /** Gaps in different spans damage each of them. */
+    /** Gaps in different GOPs damage each of them. */
     @Test
-    void gapsInDifferentSpansDamageEachOfThem() throws IOException {
+    void gapsInDifferentGopsDamageEachOfThem() throws IOException {
         byte[] data = read("/bframes.ts");
         TsAnalyzer analyzer = new TsAnalyzer();
 
@@ -138,7 +185,7 @@ class RandomAccessTest {
                     sinceKeyframe = 0;
                 } else if (keyframes >= 1) {
                     sinceKeyframe++;
-                    // One gap early in each of the second and third spans.
+                    // One gap early in each of the second and third GOPs.
                     if (sinceKeyframe == 4 && (keyframes == 1 || keyframes == 2)) {
                         dropped++;
                         continue;
@@ -150,28 +197,28 @@ class RandomAccessTest {
 
         assertThat(dropped).isEqualTo(2);
         PidStats video = analyzer.stats().pid(VIDEO_PID);
-        assertThat(video.damagedIntervals()).as("one span each").isEqualTo(2);
-        assertThat(video.damagedIntervalRate()).isGreaterThan(0.0);
+        assertThat(video.damagedGops()).as("one GOP each").isEqualTo(2);
+        assertThat(video.damagedGopRate()).isGreaterThan(0.0);
     }
 
     /**
-     * A gap on the keyframe packet belongs to the span that just ended — proved
-     * by a span that was already damaged before it.
+     * A gap on the keyframe packet belongs to the GOP that just ended — proved
+     * by a GOP that was already damaged before it.
      *
      * <p>Order of operations, and getting to a case that can tell the two apart
      * took a second attempt. With a single gap both orderings count one damaged
-     * span; they disagree only about which span that is, and a total hides that.
-     * Two gaps in one span, the second landing exactly on the keyframe that
+     * span; they disagree only about which GOP that is, and a total hides that.
+     * Two gaps in one GOP, the second landing exactly on the keyframe that
      * closes it, is the case that separates them: handled in the right order the
-     * span is already marked and the count stays at one, while resetting first
-     * makes the second gap look like fresh damage to a span whose own packets all
+     * GOP is already marked and the count stays at one, while resetting first
+     * makes the second gap look like fresh damage to a GOP whose own packets all
      * arrived intact.
      */
     @Test
-    void aGapOnTheKeyframePacketDoesNotDoubleCountAnAlreadyDamagedSpan() throws IOException {
+    void aGapOnTheKeyframePacketDoesNotDoubleCountAnAlreadyDamagedGop() throws IOException {
         byte[] data = read("/bframes.ts");
 
-        // Find the keyframe that closes the span we will damage.
+        // Find the keyframe that closes the GOP we will damage.
         int keyframesSeen = 0;
         int closingKeyframeOffset = -1;
         for (int offset = 0; offset + TsPacket.LENGTH <= data.length; offset += TsPacket.LENGTH) {
@@ -223,7 +270,7 @@ class RandomAccessTest {
 
         PidStats video = analyzer.stats().pid(VIDEO_PID);
         assertThat(video.continuityErrors()).as("two separate gaps").isEqualTo(2);
-        assertThat(video.damagedIntervals())
+        assertThat(video.damagedGops())
                 .as("both are in the same span, so it is damaged once")
                 .isEqualTo(1);
     }
@@ -236,7 +283,7 @@ class RandomAccessTest {
      * PES packet is somewhere a decoder could start, and ffmpeg flags them
      * accordingly. The consequence matters for how these figures are read:
      * damage does not propagate through audio the way it does through a video
-     * GOP, so a damaged span means something quite different on each. The metric
+     * GOP, so a damaged GOP means something quite different on each. The metric
      * is worth watching on video and close to noise on audio.
      */
     @Test
@@ -249,20 +296,20 @@ class RandomAccessTest {
         assertThat(audio.randomAccessPoints())
                 .as("one per PES packet, since every AAC frame stands alone")
                 .isEqualTo(audio.pesPackets());
-        assertThat(audio.averageRandomAccessInterval())
-                .as("a far shorter span than video's")
-                .isLessThan(video.averageRandomAccessInterval());
+        assertThat(audio.gopLengthPackets())
+                .as("a far shorter GOP than video's")
+                .isLessThan(video.gopLengthPackets());
     }
 
-    /** A track with no keyframes at all reports no spans rather than dividing by zero. */
+    /** A track with no keyframes at all reports no GOPs rather than dividing by zero. */
     @Test
     void aTrackWithoutRandomAccessPointsReportsNoIntervals() throws IOException {
         // A table PID: no adaptation fields, so no flags of any kind.
         PidStats tables = analyze("/bframes.ts").stats().pid(TsPacket.PAT_PID);
 
         assertThat(tables.randomAccessPoints()).isZero();
-        assertThat(tables.averageRandomAccessInterval()).isZero();
-        assertThat(tables.damagedIntervalRate()).isZero();
+        assertThat(tables.gopLengthPackets()).isZero();
+        assertThat(tables.damagedGopRate()).isZero();
         assertThat(tables.packetsSinceRandomAccess()).as("never seen one").isEqualTo(-1);
     }
 }

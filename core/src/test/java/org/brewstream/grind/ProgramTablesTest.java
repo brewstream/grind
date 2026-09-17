@@ -133,7 +133,7 @@ class ProgramTablesTest {
     void everySectionInTheFixturePassesItsChecksum() throws IOException {
         TsStreamStats stats = analyzeSample().stats();
 
-        assertThat(stats.tableCrcFailures()).as("a locally muxed file has intact tables").isZero();
+        assertThat(stats.crcErrors()).as("a locally muxed file has intact tables").isZero();
         assertThat(stats.isHealthy()).isTrue();
     }
 
@@ -168,7 +168,7 @@ class ProgramTablesTest {
 
         assertThat(analyzer.programs().isKnown())
                 .as("no table should have been accepted").isFalse();
-        assertThat(analyzer.stats().tableCrcFailures()).isPositive();
+        assertThat(analyzer.stats().crcErrors()).isPositive();
         assertThat(analyzer.stats().isHealthy()).as("bad tables are a health problem").isFalse();
     }
 

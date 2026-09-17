@@ -75,6 +75,19 @@ public final class TsAnalyzer {
     private long duplicates;
     private long pesPackets;
     private long syncLosses;
+    private long pcrDiscontinuities;
+
+    /**
+     * Stream time in whole seconds, taken from the PCR rather than a wall clock.
+     * A file analysed at a hundred times real speed still yields the right
+     * answer, and a live stream is measured in its own time base rather than the
+     * analyser's. Negative until the first PCR arrives, during which errors
+     * cannot be attributed to a second and so are not counted as errored ones.
+     */
+    private long currentSecond = -1;
+    private long firstSecond = -1;
+    private long streamErroredSecond = -1;
+    private long erroredSeconds;
 
     /** Registers a listener. Called synchronously on the consuming thread; see {@link TsStreamListener}. */
     public void addListener(TsStreamListener listener) {
@@ -120,6 +133,8 @@ public final class TsAnalyzer {
             // continuity errors, the one it causes and the one it hides.
             state.transportErrors++;
             transportErrors++;
+            markErroredSecond(state);
+            markGopDamaged(state);
             state.hasPrevious = false;
             return;
         }
@@ -199,7 +214,12 @@ public final class TsAnalyzer {
             psiAssemblers.put(packet.pid(), assembler);
         }
 
-        for (TableSection section : assembler.consume(packet)) {
+        long crcBefore = assembler.crcFailures();
+        List<TableSection> sections = assembler.consume(packet);
+        if (assembler.crcFailures() > crcBefore) {
+            markErroredSecond(byPid.get(packet.pid()));
+        }
+        for (TableSection section : sections) {
             if (!section.current()) {
                 // Describes a future state, not the one in force. Applying it
                 // would report tracks the stream is not carrying yet.
@@ -254,6 +274,7 @@ public final class TsAnalyzer {
      */
     public void recordSyncLoss(int bytesDiscarded) {
         syncLosses++;
+        markErroredSecond(null);
         fire(listener -> listener.onSyncLost(bytesDiscarded));
     }
 
@@ -306,15 +327,10 @@ public final class TsAnalyzer {
         int lost = (counter - expected + 16) % 16;
         state.continuityErrors++;
         state.packetsLost += lost;
-        // Counted once per interval, however many gaps it takes: the span is
-        // either damaged or it is not, and a second gap in an already-broken
-        // GOP does not make it twice as broken.
-        if (state.randomAccessPoints > 0 && !state.currentIntervalDamaged) {
-            state.currentIntervalDamaged = true;
-            state.damagedIntervals++;
-        }
         continuityErrors++;
         packetsLost += lost;
+        markErroredSecond(state);
+        markGopDamaged(state);
         fire(listener -> listener.onContinuityError(packet.pid(), expected, counter, lost));
     }
 
@@ -336,7 +352,7 @@ public final class TsAnalyzer {
         if (randomAccess) {
             state.randomAccessPoints++;
             state.packetsSinceRandomAccess = 0;
-            state.currentIntervalDamaged = false;
+            state.currentGopDamaged = false;
         } else if (state.randomAccessPoints > 0) {
             state.packetsSinceRandomAccess++;
         }
@@ -361,10 +377,71 @@ public final class TsAnalyzer {
             if (!announced && (delta < 0 || delta > PCR_DISCONTINUITY_THRESHOLD)) {
                 long previous = state.lastPcr;
                 state.pcrDiscontinuities++;
+                pcrDiscontinuities++;
+                markErroredSecond(state);
                 fire(listener -> listener.onPcrDiscontinuity(packet.pid(), previous, pcr));
             }
         }
         state.lastPcr = pcr;
+
+        long second = pcr / AdaptationField.PCR_RATE_HZ;
+        if (firstSecond < 0) {
+            firstSecond = second;
+        }
+        currentSecond = second;
+    }
+
+    /**
+     * Records that the GOP currently open on this PID took damage.
+     *
+     * <p>Counted once per GOP however many errors it takes. Everything between
+     * two random-access points depends on the frame that begins it, so one gap
+     * anywhere ruins all of it and a second gap does not ruin it twice. That is
+     * what makes this different from an error count, and closer to what someone
+     * watching would describe: two packets lost inside one GOP is a single
+     * glitch, two spread across two GOPs is two.
+     *
+     * <p>Damage before the first random-access point is not attributed to
+     * anything — there is no GOP open yet to damage.
+     *
+     * <p>Read this on video. Nearly every audio frame is its own random-access
+     * point, so an audio GOP is one frame long and damage does not propagate;
+     * the figure degenerates into an error count there.
+     */
+    private void markGopDamaged(PidState state) {
+        if (state == null || state.randomAccessPoints == 0 || state.currentGopDamaged) {
+            return;
+        }
+        state.currentGopDamaged = true;
+        state.damagedGops++;
+    }
+
+    /**
+     * Records that this second of stream time contained an error, on one PID and
+     * on the stream as a whole.
+     *
+     * <p>A second is counted once however many errors it holds. That is the point
+     * of the measure: it answers "for how long was this stream broken", which is
+     * much closer to what a viewer experienced than a packet count, and it is
+     * what broadcast monitoring equipment reports so the figure can be compared
+     * against one.
+     */
+    private void markErroredSecond(PidState state) {
+        // Belt and braces: with no clock yet currentSecond is -1, and both
+        // sentinels below start at -1 too, so the deduplication would reject the
+        // second anyway. Stated explicitly because relying on two sentinels
+        // happening to agree is not something a reader should have to work out.
+        if (currentSecond < 0) {
+            return; // no clock yet, so nothing to attribute this to
+        }
+        if (state != null && state.erroredSecond != currentSecond) {
+            state.erroredSecond = currentSecond;
+            state.erroredSeconds++;
+        }
+        if (streamErroredSecond != currentSecond) {
+            streamErroredSecond = currentSecond;
+            erroredSeconds++;
+        }
     }
 
     /** A point-in-time snapshot of everything seen so far. */
@@ -376,14 +453,16 @@ public final class TsAnalyzer {
                     state.lastPcr, state.pcrCount, state.pcrDiscontinuities,
                     state.pesPackets, state.lastPts, state.lastDts, state.streamId,
                     state.randomAccessPoints, state.packetsSinceRandomAccess,
-                    state.damagedIntervals));
+                    state.erroredSeconds, state.damagedGops));
         }
         long crcFailures = 0;
         for (SectionAssembler assembler : psiAssemblers.values()) {
             crcFailures += assembler.crcFailures();
         }
+        long observedSeconds = firstSecond < 0 ? 0 : currentSecond - firstSecond + 1;
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
-                transportErrors, duplicates, pesPackets, syncLosses, crcFailures, programMap,
+                transportErrors, duplicates, pesPackets, syncLosses, crcFailures,
+                pcrDiscontinuities, erroredSeconds, observedSeconds, programMap,
                 List.copyOf(pids));
     }
 
@@ -417,8 +496,10 @@ public final class TsAnalyzer {
         private long pcrDiscontinuities;
         private long randomAccessPoints;
         private long packetsSinceRandomAccess = -1;
-        private long damagedIntervals;
-        private boolean currentIntervalDamaged;
+        private long erroredSeconds;
+        private long erroredSecond = -1;
+        private long damagedGops;
+        private boolean currentGopDamaged;
         private long pesPackets;
         private long lastPts = -1;
         private long lastDts = -1;

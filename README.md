@@ -108,7 +108,7 @@ sends constantly.
 Sections are reassembled across packets and CRC-checked before being believed. A
 table stitched across a continuity break parses perfectly well and describes a
 stream that does not exist, so failures are counted in
-`TsStreamStats.tableCrcFailures()` and make `isHealthy()` false — loss on a table
+`TsStreamStats.crcErrors()` and make `isHealthy()` false — loss on a table
 PID is worse than loss on a video PID, because it can leave the structure
 unknown.
 
@@ -144,6 +144,56 @@ the parser does.
 `parse` returns `null` when the sync byte is missing, which means the caller has
 lost alignment rather than that one packet is bad — the recovery is to
 resynchronise, not to skip 188 bytes.
+
+## What it measures, in TR 101 290 terms
+
+[ETSI TR 101 290][tr101290] is the measurement vocabulary broadcast engineers
+already use, so Grind reports in it rather than inventing names. The standard
+groups its checks into three priorities: Priority 1 is "the stream is not
+decodable", Priority 2 is "decodable but wrong", Priority 3 is optional.
+
+| TR 101 290 check | Priority | Grind |
+|---|:---:|:---:|
+| `TS_sync_loss` | 1 | `syncLosses()` |
+| `Sync_byte_error` | 1 | `TsPacket.parse` returns `null` |
+| `Continuity_count_error` | 1 | `continuityErrors()`, per PID and per stream |
+| `PAT_error` / `PMT_error` — table present and parseable | 1 | partial: presence and CRC, **not the 0.5s repetition limit** |
+| `Transport_error` | 2 | `transportErrors()` |
+| `CRC_error` | 2 | `crcErrors()` |
+| `PCR_discontinuity_indicator_error` | 2 | `pcrDiscontinuities()` |
+| `PID_error` — a referenced PID never appears | 3 | derivable: the PMT lists it, `stats.pid()` returns `null`. No timer |
+| `PCR_repetition_error` (40ms), `PCR_accuracy_error` (±500ns) | 2 | **not implemented** |
+| `PTS_error` — PTS at least every 700ms | 2 | **not implemented** |
+| `CAT_error`, scrambling checks | 2 | **not implemented** |
+
+The unimplemented ones are all *timing* checks, and they share a reason: they
+need a rate model rather than a parser. Phase 2's PTS-to-PCR skew work is where
+that starts.
+
+**Errored seconds** is reported alongside, per PID and per stream: seconds of
+stream time containing at least one of the above, counted once however many the
+second holds. It answers "for how long was this broken" rather than "how many
+packets went wrong". The time base is the stream's own PCR, so a file analysed
+faster than real time still reports the seconds it actually contains, and a live
+stream is measured in its own clock rather than the analyser's.
+
+### GOP damage, which TR 101 290 has no name for
+
+The standard counts errors and seconds. Neither says where damage landed in the
+*media*, and that is what decides whether a viewer saw anything. So Grind reports
+`damagedGops()` alongside: groups of pictures containing at least one error,
+counted once per GOP however many it took.
+
+The two measures disagree in a way worth having both for. A burst of loss inside
+one second is one errored second and one damaged GOP. The same number of packets
+spread thinly is still about one errored second, but damages every GOP it
+touches — far more visible, and indistinguishable on the standard figures alone.
+
+Read it on video. Nearly every audio frame is its own random-access point, so an
+audio GOP is one frame long, damage does not propagate, and the figure
+degenerates into an error count.
+
+[tr101290]: https://www.etsi.org/deliver/etsi_tr/101200_101299/101290/
 
 ## Roadmap
 
