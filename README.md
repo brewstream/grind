@@ -26,8 +26,9 @@ Two artifacts:
 
 | Module | Purpose | Dependencies |
 |---|---|---|
-| `grind` | parser and analyzer | none |
+| `grind-core` | parser and analyzer | none |
 | `grind-netty` | pipeline handlers | Netty |
+| `grind-scte35` | splice information (planned) | `grind-core` |
 
 **Not yet published.** Consume as a Gradle composite build until a release is cut:
 
@@ -248,7 +249,8 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; PES headers (PTS/DTS); continuity tracking; per-PID stats | **done** |
 | **1b — Clocks and timing** | Per-program clocks (**done**); PCR repetition and accuracy; PTS intervals and PTS-to-PCR skew; PAT/PMT repetition | **in progress** |
 | **2 — Elementary streams** | PES payload reassembly into access units; frame boundaries from PES starts | **parked**, see below |
-| **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing; SCTE-35 splice information | planned |
+| **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
+| **SCTE-35** | splice information, read only, in `grind-scte35` | next, see below |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
 
@@ -288,7 +290,11 @@ the work is comparison rather than new parsing. In order:
   enable: audio drifting against video, and timestamps running far enough ahead
   of or behind the clock that a player starves or overflows.
 
-### Before building SCTE-35 (phase 3)
+### SCTE-35: scope, and why it is its own module
+
+**Read only.** Grind reports what splice information a stream carries. It does
+not create, modify or remove it. Injection is discussed at the end of this
+section and is deliberately not planned.
 
 Splice information is independent of phase 2, despite the roadmap ordering.
 SCTE-35 rides in PSI-style sections on its own PID, declared in the PMT as
@@ -297,7 +303,53 @@ irrelevant to it. `StreamType.SCTE35` already exists, so Grind labels these
 tracks today without parsing them, and `SectionAssembler` already does the
 assembly and CRC-32 they need.
 
-Three things to know before starting, each of which is easy to get wrong:
+#### Its own module
+
+`grind-scte35`, depending only on `grind-core`'s published API.
+
+This is not the usual reason for a module. `grind-netty` exists to isolate a
+dependency, and SCTE-35 adds none — so on that test alone it would belong in
+`grind-core`. Two things outweigh it:
+
+- **It is a different standard**, with its own scope and revision cadence, and a
+  different audience. Someone monitoring transport health should not have to
+  take splice parsing with it.
+- **It is not small.** `splice_insert`, `time_signal`, `splice_schedule`, plus
+  `segmentation_descriptor` with some thirty segmentation types and fifteen UPID
+  formats. Done fully it rivals the rest of `grind-core`.
+
+It is cheap because the machinery it needs is already public: `SectionAssembler`,
+`TableSection` and `Crc32Mpeg` are all exported, so this costs no new API surface
+in `grind-core`.
+
+#### What read-only support means
+
+Roughly in order, each piece useful on its own:
+
+1. **Find the PIDs.** Streams the PMT declares as type `0x86`. `StreamType.SCTE35`
+   already exists, so Grind labels these tracks today. A conforming PMT also
+   carries a `CUEI` registration descriptor; descriptor parsing is phase 3, so
+   stream type alone is the starting point and the descriptor is a later
+   confirmation rather than a precondition.
+2. **Assemble the sections.** `SectionAssembler` already does this, including the
+   CRC-32 these share with the PAT and PMT. Note that `TsAnalyzer` currently
+   routes only PAT and PMT PIDs to an assembler, so this module needs its own
+   path from packets to sections rather than a hook into that one.
+3. **Parse `splice_info_section`** — table id `0xFC`: `pts_adjustment`, tier, the
+   encryption flag, and the command type. **An encrypted section must be reported
+   as unreadable rather than parsed**, or the fields come out as plausible
+   nonsense.
+4. **Commands.** `splice_insert` and `time_signal` carry real-world traffic and
+   come first. `splice_null`, `splice_schedule`, `bandwidth_reservation` and
+   private commands should be recognised and reported by name without being
+   parsed, so an unfamiliar stream is described rather than ignored.
+5. **`segmentation_descriptor`** (tag `0x02`). Where modern broadcasters put the
+   meaning — event id, segmentation type, UPID, duration. The largest single
+   piece, and worth its own pass.
+6. **The event view.** Each splice as a record carrying both times: when the
+   section arrived, and when the splice fires. See below.
+
+#### Three things that are easy to get wrong
 
 **A splice PID is silent most of the time.** It is declared in the PMT and
 carries nothing for minutes between ad breaks — TSDuck's `spliceinject` leaves
@@ -326,6 +378,27 @@ Fixtures should be generated by TSDuck from XML and verified with its
 has enough surface — `pts_adjustment`, some thirty segmentation types, some
 fifteen UPID formats — that hand-crafting the binary would encode the same
 misreading into the fixture and the parser at once.
+
+#### Injection, which is not planned
+
+Grind understands transport stream structure well enough that inserting splice
+information into a live stream is a plausible next step, and it is the natural
+product these libraries point at: SRT in, markers added in flight, SRT out, no
+transcoding. It is recorded here so the option is not rediscovered, and it is
+**not on the roadmap**.
+
+What it would take, if it ever is: phase 4 promoted from optional to essential,
+since writing a conforming stream is the prerequisite; a PMT rewrite with
+correct version handling so receivers notice the new PID; and null-packet
+*replacement* rather than insertion, so that nothing after the injection point
+shifts position and the stream's PCR timing is preserved exactly. That last
+constraint gives a property worth testing directly — every packet the injector
+does not need to change comes out byte-identical.
+
+The reason it is not a small step: everything here is safe by construction today,
+because a bug in an analyser produces a wrong number. A bug in an injector
+damages a working stream. That deserves a different standard of care, not just
+more of the same work.
 
 **Parked — `PCR_accuracy_error`.** The ±500ns check measures muxing jitter, and
 measuring it means relating byte position in the stream to time: derive the
