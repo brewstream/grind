@@ -17,6 +17,7 @@
 package org.brewstream.grind;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +53,7 @@ public final class TsAnalyzer {
      */
     private static final long PCR_DISCONTINUITY_THRESHOLD = 27_000_000L / 10;
 
+
     /**
      * The full span of the PCR before it wraps: the base is 33 bits of 90 kHz,
      * and each base tick is 300 of the 27 MHz units this class works in
@@ -78,14 +80,43 @@ public final class TsAnalyzer {
     private long pcrDiscontinuities;
 
     /**
-     * Stream time in whole seconds, taken from the PCR rather than a wall clock.
-     * A file analysed at a hundred times real speed still yields the right
-     * answer, and a live stream is measured in its own time base rather than the
-     * analyser's. Negative until the first PCR arrives, during which errors
-     * cannot be attributed to a second and so are not counted as errored ones.
+     * One clock per PID that carries a PCR, which in practice means one per
+     * program.
+     *
+     * <p>A transport stream is a multiplex, and there is no rule that its
+     * programs share a time base. A DVB transponder carrying unrelated services
+     * has a PCR per program and those clocks are genuinely independent — they can
+     * be hours apart and drift against each other. Measuring everything against
+     * whichever PCR happened to arrive last would make every program's figures
+     * depend on its neighbours, which is wrong in a way that only shows up on
+     * real multiplexes: a stream ffmpeg produced from one source has one clock
+     * shared by every program, and hides the bug completely.
+     *
+     * <p>Keyed by PCR PID rather than by program number so that clocks exist
+     * before any PSI has been parsed. Attribution improves once the PMTs arrive
+     * and say which program a PID belongs to; until then everything falls back to
+     * the reference clock.
      */
-    private long currentSecond = -1;
-    private long firstSecond = -1;
+    private final Map<Integer, Clock> clocksByPcrPid = new LinkedHashMap<>();
+
+    /**
+     * Which clock a PID's errors are counted against, rebuilt whenever the
+     * program tables change. A PID the tables do not account for is not present,
+     * and falls back to the reference clock.
+     */
+    private Map<Integer, Clock> clockByPid = Map.of();
+
+    /**
+     * The clock stream-level figures are measured on: the first one the stream
+     * revealed, and never reassigned.
+     *
+     * <p>Something has to provide the timeline for a figure that spans programs,
+     * and a reference that changed mid-stream would make the count meaningless.
+     * When programs really do have independent clocks, the per-PID figures are
+     * the ones to read; this is the transport stream's own summary and says so.
+     */
+    private Clock referenceClock;
+
     private long streamErroredSecond = -1;
     private long erroredSeconds;
 
@@ -254,6 +285,7 @@ public final class TsAnalyzer {
         }
 
         if (!programMap.equals(previous)) {
+            rebindClocks();
             ProgramMap announced = programMap;
             fire(listener -> listener.onProgramsChanged(announced));
         }
@@ -384,11 +416,66 @@ public final class TsAnalyzer {
         }
         state.lastPcr = pcr;
 
-        long second = pcr / AdaptationField.PCR_RATE_HZ;
-        if (firstSecond < 0) {
-            firstSecond = second;
+        clockFor(packet.pid()).advanceTo(pcr / AdaptationField.PCR_RATE_HZ);
+    }
+
+    /**
+     * The clock a PCR PID drives, created on first sight.
+     *
+     * <p>The first one created becomes the reference, which is why this is the
+     * only place clocks come into being: a clock conjured from a lookup on some
+     * unrelated PID could win that race and anchor the stream-level figures to a
+     * timeline nothing else uses.
+     */
+    private Clock clockFor(int pcrPid) {
+        Clock clock = clocksByPcrPid.get(pcrPid);
+        if (clock == null) {
+            clock = new Clock();
+            clocksByPcrPid.put(pcrPid, clock);
+            if (referenceClock == null) {
+                referenceClock = clock;
+            }
         }
-        currentSecond = second;
+        return clock;
+    }
+
+    /**
+     * The clock one PID's errors belong to: its own program's, or the reference
+     * when the tables do not account for it.
+     *
+     * <p>PSI PIDs and null packets genuinely belong to no program, and errors on
+     * them are errors against the whole multiplex rather than against one
+     * service, so the reference is the right answer rather than a fallback.
+     */
+    private Clock clockOf(PidState state) {
+        if (state == null) {
+            return referenceClock;
+        }
+        Clock clock = clockByPid.get(state.pid);
+        return clock != null ? clock : referenceClock;
+    }
+
+    /**
+     * Rebinds each PID to its program's clock after the tables changed.
+     *
+     * <p>Rebuilt wholesale rather than patched: a PMT can move a track between
+     * programs or change a program's PCR PID, and reconciling that incrementally
+     * is more code than redoing a map with a few dozen entries.
+     */
+    private void rebindClocks() {
+        Map<Integer, Clock> rebound = new HashMap<>();
+        for (ProgramMapTable table : programMap.programs().values()) {
+            int pcrPid = table.pcrPid();
+            if (pcrPid == TsPacket.NULL_PID) {
+                continue; // a program with no clock of its own
+            }
+            Clock clock = clockFor(pcrPid);
+            rebound.put(pcrPid, clock);
+            for (ElementaryStream stream : table.streams()) {
+                rebound.put(stream.pid(), clock);
+            }
+        }
+        clockByPid = Map.copyOf(rebound);
     }
 
     /**
@@ -427,20 +514,49 @@ public final class TsAnalyzer {
      * against one.
      */
     private void markErroredSecond(PidState state) {
-        // Belt and braces: with no clock yet currentSecond is -1, and both
-        // sentinels below start at -1 too, so the deduplication would reject the
-        // second anyway. Stated explicitly because relying on two sentinels
-        // happening to agree is not something a reader should have to work out.
-        if (currentSecond < 0) {
-            return; // no clock yet, so nothing to attribute this to
-        }
-        if (state != null && state.erroredSecond != currentSecond) {
-            state.erroredSecond = currentSecond;
+        // The PID's own program clock, so a second counted against program 2 is a
+        // second of program 2's timeline, whatever program 1's clock happens to
+        // read at the time.
+        Clock own = clockOf(state);
+        if (state != null && own != null && own.currentSecond >= 0
+                && state.erroredSecond != own.currentSecond) {
+            state.erroredSecond = own.currentSecond;
             state.erroredSeconds++;
         }
-        if (streamErroredSecond != currentSecond) {
-            streamErroredSecond = currentSecond;
+        // The stream-level figure is measured on the reference clock regardless
+        // of which program erred: it answers "was this multiplex broken, and for
+        // how long", and needs one timeline to answer it on.
+        if (referenceClock != null && referenceClock.currentSecond >= 0
+                && streamErroredSecond != referenceClock.currentSecond) {
+            streamErroredSecond = referenceClock.currentSecond;
             erroredSeconds++;
+        }
+    }
+
+    /**
+     * One program's notion of time, in whole seconds, taken from its PCR rather
+     * than a wall clock.
+     *
+     * <p>A file analysed at a hundred times real speed still yields the right
+     * answer, and a live stream is measured in its own time base rather than the
+     * analyser's. Negative until this program's first PCR arrives, during which
+     * its errors cannot be attributed to a second and so are not counted as
+     * errored ones.
+     */
+    private static final class Clock {
+
+        private long currentSecond = -1;
+        private long firstSecond = -1;
+
+        void advanceTo(long second) {
+            if (firstSecond < 0) {
+                firstSecond = second;
+            }
+            currentSecond = second;
+        }
+
+        long observedSeconds() {
+            return firstSecond < 0 ? 0 : currentSecond - firstSecond + 1;
         }
     }
 
@@ -459,7 +575,7 @@ public final class TsAnalyzer {
         for (SectionAssembler assembler : psiAssemblers.values()) {
             crcFailures += assembler.crcFailures();
         }
-        long observedSeconds = firstSecond < 0 ? 0 : currentSecond - firstSecond + 1;
+        long observedSeconds = referenceClock == null ? 0 : referenceClock.observedSeconds();
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
                 transportErrors, duplicates, pesPackets, syncLosses, crcFailures,
                 pcrDiscontinuities, erroredSeconds, observedSeconds, programMap,

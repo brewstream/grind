@@ -177,6 +177,16 @@ packets went wrong". The time base is the stream's own PCR, so a file analysed
 faster than real time still reports the seconds it actually contains, and a live
 stream is measured in its own clock rather than the analyser's.
 
+**There is a clock per program, not per stream.** A multiplex carrying unrelated
+services has independent PCRs, potentially hours apart, and a second counted
+against one program has to be a second of *that* program's timeline. A PID's
+errors are counted against its own program's clock, resolved from the PMT; PSI
+PIDs and null packets belong to no program and fall to the reference clock, which
+is the first the stream revealed. The stream-level figure is measured on that
+reference, because a count spanning programs needs one timeline to be counted
+on — when programs really are independent, the per-PID figures are the ones to
+read.
+
 ### GOP damage, which TR 101 290 has no name for
 
 The standard counts errors and seconds. Neither says where damage landed in the
@@ -203,7 +213,8 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | Phase | Scope | State |
 |---|---|:---:|
 | **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; PES headers (PTS/DTS); continuity tracking; per-PID stats | **done** |
-| **2 — Elementary streams** | PES payload reassembly into access units; frame boundaries and random-access points; PTS-to-PCR skew | next |
+| **1b — Clocks and timing** | Per-program clocks (**done**); PCR repetition and accuracy; PTS intervals and PTS-to-PCR skew; PAT/PMT repetition | **in progress** |
+| **2 — Elementary streams** | PES payload reassembly into access units; frame boundaries from PES starts | **parked**, see below |
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing; SCTE-35 splice information | planned |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
@@ -211,6 +222,56 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 Phases 4 and 5 are genuinely optional and exist so the boundary is written down.
 The honest v1 line is: **everything needed to inspect, nothing needed to
 decode.**
+
+### What is being worked on, and what is parked
+
+Phase 2 as originally scoped bundled two things with very different value, so it
+has been split. What follows is the reasoning, kept here so the decision does not
+have to be rediscovered.
+
+**Being done now — the timing checks (1b).** Every TR 101 290 check Grind does
+not implement is a *timing* check, and they are the largest remaining gap. They
+are also close to free: PTS, DTS and PCR are already tracked per PID, so most of
+the work is comparison rather than new parsing. In order:
+
+- **Per-program clocks — done.** A transport stream is a multiplex and its
+  programs need not share a time base. Errored seconds are now counted against
+  the erring PID's *own* program clock. See the note below on why no fixture
+  caught this.
+- **`PCR_repetition_error`** (P2) — a PCR at least every 40ms.
+- **`PCR_accuracy_error`** (P2) — ±500ns. Needs a rate model, so it is the
+  hardest of these and may land last.
+- **`PTS_error`** (P2) — a PTS at least every 700ms.
+- **PAT/PMT repetition** (P1) — tables at least every 0.5s.
+- **PTS-to-PCR skew** — not a TR 101 290 check, but the diagnostic those parts
+  enable: audio drifting against video, and timestamps running far enough ahead
+  of or behind the clock that a player starves or overflows.
+
+**Parked — access-unit reassembly.** Collecting PES payload across TS packets
+into whole frames. Parked rather than dropped, and the reasons are worth stating
+because they are the argument for un-parking it later:
+
+- On its own it produces complete byte arrays that nothing reads. Its payoff is
+  codec-level inspection — resolution, profile, real frame types from slice
+  headers — and that is phase 3 work.
+- It needs decisions that cannot be made well in the abstract: a memory cap for a
+  corrupt stream whose PES never terminates, the lifetime of assembled buffers,
+  and what a GOP straddling a discontinuity should produce.
+- It is the first step across the v1 line above. Inspecting a stream does not
+  require reassembling it; decoding does.
+
+The trigger for un-parking it is a consumer that actually needs access units,
+because that consumer can answer the questions above. Guessing at them now would
+mean building the wrong thing carefully.
+
+**Parked — a fixture with genuinely independent program clocks.** Both programs
+in `multiprogram.ts` carry the same clock, because ffmpeg built them from one
+source; their PCRs agree to the millisecond. So the per-program clock work is
+covered by tests that take the program structure from that fixture and drive the
+timeline by hand, which is precise but not the real thing. A fixture muxed from
+two unrelated sources would be better evidence. It needs tooling this project
+does not have yet, and the hand-driven tests do catch the bug — reverting to a
+single clock fails three of them.
 
 ## How this is verified
 
