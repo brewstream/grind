@@ -257,6 +257,94 @@ class ErroredSecondsTest {
         assertThat(stats.isHealthy()).isFalse();
     }
 
+    /**
+     * A looping file, which is what a demonstration actually runs.
+     *
+     * <p>Each wrap sends the clock backwards, and for a long time that made the
+     * observed span <em>shrink</em> while errored seconds kept accumulating —
+     * reporting twelve errored seconds out of four observed, which is not a
+     * number that can be true. It showed up on a dashboard rather than here,
+     * because a single pass never revisits a second.
+     */
+    @Test
+    void aLoopingStreamNeverReportsMoreErroredSecondsThanObserved() {
+        startClock();
+
+        for (int loop = 0; loop < 4; loop++) {
+            advanceSeconds(3);
+            injectError(VIDEO_PID);
+            // Back to the beginning, as replaying a file does. Unannounced, so
+            // the analyser sees exactly what a receiver would.
+            pcr = 0;
+            analyzer.consume(withPcr(VIDEO_PID, next(VIDEO_PID), pcr));
+        }
+
+        TsStreamStats stats = analyzer.stats();
+        assertThat(stats.erroredSeconds())
+                .as("a second cannot be errored more often than it was observed")
+                .isLessThanOrEqualTo(stats.observedSeconds());
+        assertThat(stats.erroredSecondRate()).isBetween(0.0, 1.0);
+    }
+
+    /** Replayed seconds are counted again, because they are more stream time. */
+    @Test
+    void timeObservedKeepsGrowingAcrossAWrap() {
+        startClock();
+        advanceSeconds(3);
+        long before = analyzer.stats().observedSeconds();
+
+        pcr = 0;
+        analyzer.consume(withPcr(VIDEO_PID, next(VIDEO_PID), pcr));
+        advanceSeconds(3);
+
+        assertThat(analyzer.stats().observedSeconds())
+                .as("the second pass is more stream time, not a return to earlier time")
+                .isGreaterThan(before);
+    }
+
+    /**
+     * An error in a replayed second is still an errored second.
+     *
+     * <p>Identity comes from the running count rather than the clock's value, so
+     * a second the clock has used before does not look like one already counted.
+     */
+    @Test
+    void anErrorInAReplayedSecondIsCountedAgain() {
+        startClock();
+        injectError(VIDEO_PID);
+        assertThat(analyzer.stats().erroredSeconds()).isEqualTo(1);
+
+        // Back to the same second number the clock has already been through.
+        pcr = 0;
+        analyzer.consume(withPcr(VIDEO_PID, next(VIDEO_PID), pcr));
+        advanceSeconds(1);
+        injectError(VIDEO_PID);
+
+        assertThat(analyzer.stats().erroredSeconds())
+                .as("the same second number, but a different second of stream time")
+                .isEqualTo(2);
+    }
+
+    /**
+     * A clock that skips forward did not thereby observe the time it skipped.
+     *
+     * <p>The mirror of the wrap case: an hour-long jump counts as the one second
+     * actually entered, not as an hour of stream nobody saw.
+     */
+    @Test
+    void aForwardJumpDoesNotInventTimeThatWasNotObserved() {
+        startClock();
+        advanceSeconds(2);
+        long before = analyzer.stats().observedSeconds();
+
+        pcr += 3600L * AdaptationField.PCR_RATE_HZ;
+        analyzer.consume(withPcr(VIDEO_PID, next(VIDEO_PID), pcr));
+
+        assertThat(analyzer.stats().observedSeconds())
+                .as("one more second entered, not an hour of it")
+                .isEqualTo(before + 1);
+    }
+
     // --- hand-built packets, so errors land where the test wants them
 
     private static TsPacket packet(int pid, int counter) {

@@ -668,17 +668,17 @@ public final class TsAnalyzer {
         // second of program 2's timeline, whatever program 1's clock happens to
         // read at the time.
         Clock own = clockOf(state);
-        if (state != null && own != null && own.currentSecond >= 0
-                && state.erroredSecond != own.currentSecond) {
-            state.erroredSecond = own.currentSecond;
+        if (state != null && own != null && own.index() > 0
+                && state.erroredSecond != own.index()) {
+            state.erroredSecond = own.index();
             state.erroredSeconds++;
         }
         // The stream-level figure is measured on the reference clock regardless
         // of which program erred: it answers "was this multiplex broken, and for
         // how long", and needs one timeline to answer it on.
-        if (referenceClock != null && referenceClock.currentSecond >= 0
-                && streamErroredSecond != referenceClock.currentSecond) {
-            streamErroredSecond = referenceClock.currentSecond;
+        if (referenceClock != null && referenceClock.index() > 0
+                && streamErroredSecond != referenceClock.index()) {
+            streamErroredSecond = referenceClock.index();
             erroredSeconds++;
         }
     }
@@ -752,8 +752,25 @@ public final class TsAnalyzer {
      */
     private static final class Clock {
 
-        private long currentSecond = -1;
-        private long firstSecond = -1;
+        /** The raw PCR second, kept only to notice when it changes. */
+        private long currentSecond = Long.MIN_VALUE;
+
+        /**
+         * Seconds of stream time observed, counted as they are entered rather
+         * than measured from the first to the current one.
+         *
+         * <p>That difference is the whole point. Subtracting the first second
+         * from the current one assumes the clock only ever moves forward, and a
+         * stream whose clock goes backwards — a looping file is the everyday
+         * case — makes the span shrink while the errors counted against it keep
+         * accumulating. The result was more errored seconds than observed ones,
+         * which is not a number that can be true.
+         *
+         * <p>Counting entries is also the right answer for a clock that jumps
+         * <em>forward</em>: a stream that skips an hour did not thereby observe
+         * an hour, and this counts the one second it actually entered.
+         */
+        private long observedSeconds;
 
         /**
          * The most recent PCR in 27 MHz units, or -1 before one has arrived.
@@ -767,14 +784,30 @@ public final class TsAnalyzer {
         void advanceTo(long pcr) {
             lastPcr = pcr;
             long second = pcr / AdaptationField.PCR_RATE_HZ;
-            if (firstSecond < 0) {
-                firstSecond = second;
+            if (second != currentSecond) {
+                currentSecond = second;
+                observedSeconds++;
             }
-            currentSecond = second;
         }
 
         long observedSeconds() {
-            return firstSecond < 0 ? 0 : currentSecond - firstSecond + 1;
+            return observedSeconds;
+        }
+
+        /**
+         * Which second this is, for deciding whether an error has already been
+         * counted against it.
+         *
+         * <p>The running count rather than the clock's own value, because a clock
+         * that goes backwards revisits second numbers it has used before.
+         * Compared against the raw value, an error in a replayed second would be
+         * dismissed as one already counted; compared against this, every second
+         * of stream time has an identity of its own.
+         *
+         * @return the current second's identity, or 0 before any PCR has arrived
+         */
+        long index() {
+            return observedSeconds;
         }
     }
 
