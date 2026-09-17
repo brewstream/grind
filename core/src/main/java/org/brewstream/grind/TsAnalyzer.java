@@ -126,6 +126,10 @@ public final class TsAnalyzer {
 
         trackScrambling(packet, state);
         trackContinuity(packet, state);
+        // After continuity, deliberately: a gap detected on the packet that
+        // carries a random-access indicator belongs to the interval that just
+        // ended, not the one it begins.
+        trackRandomAccess(packet, state);
         trackPcr(packet, state);
         trackTables(packet);
         trackPes(packet, state);
@@ -302,9 +306,40 @@ public final class TsAnalyzer {
         int lost = (counter - expected + 16) % 16;
         state.continuityErrors++;
         state.packetsLost += lost;
+        // Counted once per interval, however many gaps it takes: the span is
+        // either damaged or it is not, and a second gap in an already-broken
+        // GOP does not make it twice as broken.
+        if (state.randomAccessPoints > 0 && !state.currentIntervalDamaged) {
+            state.currentIntervalDamaged = true;
+            state.damagedIntervals++;
+        }
         continuityErrors++;
         packetsLost += lost;
         fire(listener -> listener.onContinuityError(packet.pid(), expected, counter, lost));
+    }
+
+    /**
+     * Tracks where a decoder could start, and whether the span since the last
+     * such point took damage.
+     *
+     * <p>The random-access indicator marks the packets a decoder can begin from —
+     * keyframes, in practice — and that is what decides whether loss is a blink
+     * or a second of visible corruption. Everything between two of these points
+     * depends on the frame at the start of it, so a gap anywhere in the span
+     * damages the whole span. Counting damaged spans says far more about what a
+     * viewer saw than counting lost packets does: five packets lost inside one
+     * interval is one glitch, while five lost across five intervals is five.
+     */
+    private void trackRandomAccess(TsPacket packet, PidState state) {
+        boolean randomAccess = packet.adaptationField() != null
+                && packet.adaptationField().randomAccess();
+        if (randomAccess) {
+            state.randomAccessPoints++;
+            state.packetsSinceRandomAccess = 0;
+            state.currentIntervalDamaged = false;
+        } else if (state.randomAccessPoints > 0) {
+            state.packetsSinceRandomAccess++;
+        }
     }
 
     private void trackPcr(TsPacket packet, PidState state) {
@@ -339,7 +374,9 @@ public final class TsAnalyzer {
             pids.add(new PidStats(state.pid, state.packets, state.bytes, state.continuityErrors,
                     state.packetsLost, state.transportErrors, state.duplicates, state.scrambled,
                     state.lastPcr, state.pcrCount, state.pcrDiscontinuities,
-                    state.pesPackets, state.lastPts, state.lastDts, state.streamId));
+                    state.pesPackets, state.lastPts, state.lastDts, state.streamId,
+                    state.randomAccessPoints, state.packetsSinceRandomAccess,
+                    state.damagedIntervals));
         }
         long crcFailures = 0;
         for (SectionAssembler assembler : psiAssemblers.values()) {
@@ -378,6 +415,10 @@ public final class TsAnalyzer {
         private long lastPcr = -1;
         private long pcrCount;
         private long pcrDiscontinuities;
+        private long randomAccessPoints;
+        private long packetsSinceRandomAccess = -1;
+        private long damagedIntervals;
+        private boolean currentIntervalDamaged;
         private long pesPackets;
         private long lastPts = -1;
         private long lastDts = -1;

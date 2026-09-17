@@ -36,6 +36,19 @@ package org.brewstream.grind;
  * @param lastPts           the most recent presentation timestamp in 90 kHz units, or -1
  * @param lastDts           the most recent decode timestamp, or -1 when frames are not reordered
  * @param streamId          the PES stream id last seen, or -1 if this PID carries no PES
+ * @param randomAccessPoints packets flagged as somewhere a decoder could start — keyframes,
+ *                          in practice
+ * @param packetsSinceRandomAccess how far past the most recent one we are, or -1 if none has
+ *                          been seen yet
+ * @param damagedIntervals  spans between random-access points that contained at least one
+ *                          continuity error. <b>This is the figure closest to what a viewer
+ *                          actually saw</b>: everything in a span depends on the frame that
+ *                          begins it, so a gap anywhere in one damages all of it, and five
+ *                          packets lost inside a single span is one glitch rather than five.
+ *                          <b>Read this on video, not audio.</b> Every AAC frame is
+ *                          independently decodable, so nearly every audio packet is flagged as
+ *                          a random-access point and damage does not propagate — a damaged
+ *                          audio span means a click, not a second of corruption
  */
 public record PidStats(
         int pid,
@@ -52,11 +65,30 @@ public record PidStats(
         long pesPackets,
         long lastPts,
         long lastDts,
-        int streamId) {
+        int streamId,
+        long randomAccessPoints,
+        long packetsSinceRandomAccess,
+        long damagedIntervals) {
 
     /** Whether this PID carries the program clock. */
     public boolean carriesPcr() {
         return pcrCount > 0;
+    }
+
+    /**
+     * Average packets between random-access points — the size of a span, and so
+     * how long damage to one persists. Zero when none has been seen.
+     */
+    public double averageRandomAccessInterval() {
+        return randomAccessPoints == 0 ? 0 : (double) packets / randomAccessPoints;
+    }
+
+    /**
+     * Damaged spans as a fraction of all of them. Closer to "how often would a
+     * viewer have noticed" than any packet count.
+     */
+    public double damagedIntervalRate() {
+        return randomAccessPoints == 0 ? 0 : (double) damagedIntervals / randomAccessPoints;
     }
 
     /** Whether this PID carries an elementary stream, as opposed to tables or stuffing. */
