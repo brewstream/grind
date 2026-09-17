@@ -164,7 +164,7 @@ decodable", Priority 2 is "decodable but wrong", Priority 3 is optional.
 | `PID_error` — a referenced PID never appears | 3 | derivable: the PMT lists it, `stats.pid()` returns `null`. No timer |
 | `PCR_repetition_error` (40ms) | 2 | `pcrRepetitionErrors()`, `maxPcrIntervalMillis()` |
 | `PCR_accuracy_error` (±500ns) | 2 | **not implemented** |
-| `PTS_error` — PTS at least every 700ms | 2 | **not implemented** |
+| `PTS_error` — PTS at least every 700ms | 2 | `ptsErrors()`, `maxPtsIntervalMillis()` |
 | `CAT_error`, scrambling checks | 2 | **not implemented** |
 
 The unimplemented ones are all *timing* checks, and they share a reason: they
@@ -185,6 +185,12 @@ tolerance for jitter narrows. Folding that into errored seconds would report an
 ordinary, working stream as broken for every second of its duration, and the
 figure that was supposed to mean "for how long was this broken" would come to
 mean "for how long was this stream muxed by ffmpeg".
+
+`PTS_error` is treated the same way, and for the same reason: a track whose
+timestamps are sparse has lost nothing, it has only made presentation harder to
+schedule. The contrast between the two is worth noting, though — no fixture here
+breaches the PTS limit, because video carries one about every 39ms and audio
+every 320ms. A PCR breach mostly means ffmpeg; a PTS breach means something.
 
 So the health figures answer *was anything lost or corrupted*, and conformance
 checks are reported separately. Probes differ on this, which is exactly why it is
@@ -263,7 +269,12 @@ the work is comparison rather than new parsing. In order:
   seconds and from `isHealthy()`; see below.
 - **`PCR_accuracy_error`** (P2) — ±500ns. Needs a rate model, so it is the
   hardest of these and may land last.
-- **`PTS_error`** (P2) — a PTS at least every 700ms.
+- **`PTS_error`** (P2) — **done.** A PTS at least every 700ms, per track, with the
+  widest gap kept alongside. Measured against the program's clock rather than by
+  subtracting timestamps: the standard asks how often a PTS *appears*, and PTS
+  values run backwards with B-frames, so their difference answers a different
+  question. Resolution is therefore the PCR interval — 80ms on a typical stream —
+  which against a 700ms limit can never produce a false breach.
 - **PAT/PMT repetition** (P1) — tables at least every 0.5s.
 - **PTS-to-PCR skew** — not a TR 101 290 check, but the diagnostic those parts
   enable: audio drifting against video, and timestamps running far enough ahead

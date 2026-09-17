@@ -84,6 +84,18 @@ public interface TsStreamListener {
     default void onPcrRepetitionError(int pid, long interval) {
     }
 
+    /**
+     * A gap between a track's PTS values longer than TR 101 290's 700ms limit.
+     *
+     * <p>Unlike {@link #onPcrRepetitionError}, this one is quiet on ordinary
+     * streams: video typically carries a PTS every 40ms and audio every few
+     * hundred, so a breach is worth acting on rather than sampling.
+     *
+     * @param interval the gap in 27 MHz units; divide by 27,000 for milliseconds
+     */
+    default void onPtsRepetitionError(int pid, long interval) {
+    }
+
     default void onScramblingChanged(int pid, boolean scrambled) {
     }
 

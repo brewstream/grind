@@ -44,6 +44,13 @@ package org.brewstream.grind;
  * @param maxPcrInterval    the widest gap seen between consecutive PCRs, in 27 MHz units,
  *                          or 0 before two have arrived. More useful than the count: it
  *                          says by how much rather than how often
+ * @param ptsErrors         gaps between this track's PTS values longer than the 700ms ETSI
+ *                          TR 101 290 allows. <b>Priority 2 PTS_error.</b> Conformance
+ *                          rather than damage, like {@code pcrRepetitionErrors}, so it is
+ *                          kept out of errored seconds and {@link TsStreamStats#isHealthy()}
+ * @param maxPtsInterval    the widest of those gaps in 27 MHz units, or 0 before two PTS
+ *                          have arrived. Resolution is the program's PCR interval, so this
+ *                          reads 0 on a track carrying several PTS between two PCRs
  * @param pesPackets        PES packets started on this PID. One frame per packet for video,
  *                          but audio commonly packs many frames into one, so this is a frame
  *                          count only for video and undercounts audio badly
@@ -79,6 +86,8 @@ public record PidStats(
         long pcrDiscontinuities,
         long pcrRepetitionErrors,
         long maxPcrInterval,
+        long ptsErrors,
+        long maxPtsInterval,
         long pesPackets,
         long lastPts,
         long lastDts,
@@ -91,6 +100,11 @@ public record PidStats(
     /** The widest gap between consecutive PCRs in milliseconds, or 0 before two have arrived. */
     public double maxPcrIntervalMillis() {
         return maxPcrInterval / (AdaptationField.PCR_RATE_HZ / 1000.0);
+    }
+
+    /** The widest gap between this track's PTS values in milliseconds. */
+    public double maxPtsIntervalMillis() {
+        return maxPtsInterval / (AdaptationField.PCR_RATE_HZ / 1000.0);
     }
 
     /** Whether this PID carries the program clock. */

@@ -59,6 +59,11 @@ import java.util.List;
  *                         conformance measure rather than evidence anything was lost, and
  *                         a muxer spacing PCRs at 80ms would otherwise read as broken for
  *                         every second of a perfectly good stream
+ * @param ptsErrors        gaps between a track's PTS values longer than TR 101 290's 700ms,
+ *                         summed across every track carrying them. <b>Priority 2
+ *                         PTS_error.</b> Conformance rather than damage, so like
+ *                         {@code pcrRepetitionErrors} it is kept out of {@link #isHealthy()}
+ *                         and out of errored seconds
  * @param erroredSeconds   seconds of stream time containing at least one error. <b>The figure
  *                         a broadcast probe reports</b>, and the one that answers "for how long
  *                         was this broken" rather than "how many packets went missing".
@@ -83,6 +88,7 @@ public record TsStreamStats(
         long crcErrors,
         long pcrDiscontinuities,
         long pcrRepetitionErrors,
+        long ptsErrors,
         long erroredSeconds,
         long observedSeconds,
         ProgramMap programs,
@@ -106,10 +112,13 @@ public record TsStreamStats(
      * a stream reporting healthy beside a non-zero errored-second count would be
      * contradicting itself on the same panel.
      *
-     * <p>{@code pcrRepetitionErrors} is the deliberate exception, and the reason
+     * <p>{@code pcrRepetitionErrors} and {@code ptsErrors} are the deliberate
+     * exceptions, and the reason
      * is the distinction this method turns on: these count conditions under which
-     * <em>something was lost or corrupted</em>. A PCR arriving later than the
-     * standard allows loses nothing. It is worth reporting, and it is not this.
+     * <em>something was lost or corrupted</em>. A PCR or a PTS arriving later
+     * than the standard allows loses nothing — it makes the clock harder to
+     * recover and presentation harder to schedule. Both are worth reporting, and
+     * neither is this.
      */
     public boolean isHealthy() {
         return continuityErrors == 0 && transportErrors == 0 && syncLosses == 0

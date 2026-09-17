@@ -70,6 +70,20 @@ public final class TsAnalyzer {
     private static final long PCR_REPETITION_LIMIT = 27_000_000L * 40 / 1000;
 
     /**
+     * The longest a track may go without a PTS under ETSI TR 101 290: 700ms.
+     *
+     * <p>Like {@link #PCR_REPETITION_LIMIT} this is a conformance measure rather
+     * than a damage one, and is kept out of errored seconds and {@code
+     * isHealthy()} for the same reason: a track whose timestamps are sparse has
+     * lost nothing, it has only made presentation harder to schedule.
+     *
+     * <p>Unlike PCR repetition, no fixture in this project breaches it — video
+     * carries a PTS about every 39ms and audio every 320ms — so this one stays
+     * quiet on ordinary streams, and a breach means something.
+     */
+    private static final long PTS_REPETITION_LIMIT = 27_000_000L * 700 / 1000;
+
+    /**
      * The full span of the PCR before it wraps: the base is 33 bits of 90 kHz,
      * and each base tick is 300 of the 27 MHz units this class works in
      * (§2.4.3.5). About 26.5 hours.
@@ -94,6 +108,7 @@ public final class TsAnalyzer {
     private long syncLosses;
     private long pcrDiscontinuities;
     private long pcrRepetitionErrors;
+    private long ptsErrors;
 
     /**
      * One clock per PID that carries a PCR, which in practice means one per
@@ -224,6 +239,7 @@ public final class TsAnalyzer {
             // presentation order is not the transmission order, which is exactly
             // what the DTS exists to express. Recorded, not judged.
             state.lastPts = header.pts();
+            trackPtsRepetition(packet.pid(), state);
         }
         if (header.hasDts()) {
             state.lastDts = header.dts();
@@ -439,7 +455,7 @@ public final class TsAnalyzer {
         }
         state.lastPcr = pcr;
 
-        clockFor(packet.pid()).advanceTo(pcr / AdaptationField.PCR_RATE_HZ);
+        clockFor(packet.pid()).advanceTo(pcr);
     }
 
     /**
@@ -499,6 +515,47 @@ public final class TsAnalyzer {
             }
         }
         clockByPid = Map.copyOf(rebound);
+    }
+
+    /**
+     * Notes how much stream time passed since this track's previous PTS.
+     *
+     * <p>Measured against the program's clock rather than by subtracting one PTS
+     * from the last, and that choice matters. TR 101 290 asks how often a PTS
+     * <em>appears</em>, which is a question about arrival; PTS values are in
+     * presentation order, so with B-frames consecutive ones run backwards and
+     * their difference answers a different question entirely.
+     *
+     * <p>The resolution is therefore the program's PCR interval — 80ms on a
+     * typical ffmpeg stream — because the clock only moves when a PCR arrives.
+     * Several PTS can land between two PCRs and read as no time at all. Against
+     * a 700ms limit that is comfortable: it can never produce a false breach,
+     * and a real one is caught within a PCR interval of where it happened.
+     */
+    private void trackPtsRepetition(int pid, PidState state) {
+        Clock clock = clockOf(state);
+        if (clock == null || clock.lastPcr < 0) {
+            return; // this program has no clock yet, so there is no "when"
+        }
+        long now = clock.lastPcr;
+        long previous = state.lastPtsAtPcr;
+        state.lastPtsAtPcr = now;
+        if (previous < 0) {
+            return; // the first PTS on this track begins the measurement
+        }
+
+        long delta = now - previous;
+        if (delta <= 0) {
+            return; // inside one PCR interval, or the clock went backwards
+        }
+        if (delta > state.maxPtsInterval) {
+            state.maxPtsInterval = delta;
+        }
+        if (delta > PTS_REPETITION_LIMIT) {
+            state.ptsErrors++;
+            ptsErrors++;
+            fire(listener -> listener.onPtsRepetitionError(pid, delta));
+        }
     }
 
     /**
@@ -593,7 +650,18 @@ public final class TsAnalyzer {
         private long currentSecond = -1;
         private long firstSecond = -1;
 
-        void advanceTo(long second) {
+        /**
+         * The most recent PCR in 27 MHz units, or -1 before one has arrived.
+         *
+         * <p>Kept alongside the whole second because a check measured in
+         * milliseconds cannot be answered from a second-resolution clock. It is
+         * the closest thing to "the time now" a transport stream offers.
+         */
+        private long lastPcr = -1;
+
+        void advanceTo(long pcr) {
+            lastPcr = pcr;
+            long second = pcr / AdaptationField.PCR_RATE_HZ;
             if (firstSecond < 0) {
                 firstSecond = second;
             }
@@ -613,6 +681,7 @@ public final class TsAnalyzer {
                     state.packetsLost, state.transportErrors, state.duplicates, state.scrambled,
                     state.lastPcr, state.pcrCount, state.pcrDiscontinuities,
                     state.pcrRepetitionErrors, state.maxPcrInterval,
+                    state.ptsErrors, state.maxPtsInterval,
                     state.pesPackets, state.lastPts, state.lastDts, state.streamId,
                     state.randomAccessPoints, state.packetsSinceRandomAccess,
                     state.erroredSeconds, state.damagedGops));
@@ -624,7 +693,8 @@ public final class TsAnalyzer {
         long observedSeconds = referenceClock == null ? 0 : referenceClock.observedSeconds();
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
                 transportErrors, duplicates, pesPackets, syncLosses, crcFailures,
-                pcrDiscontinuities, pcrRepetitionErrors, erroredSeconds, observedSeconds, programMap,
+                pcrDiscontinuities, pcrRepetitionErrors, ptsErrors, erroredSeconds, observedSeconds,
+                programMap,
                 List.copyOf(pids));
     }
 
@@ -658,6 +728,9 @@ public final class TsAnalyzer {
         private long pcrDiscontinuities;
         private long pcrRepetitionErrors;
         private long maxPcrInterval;
+        private long ptsErrors;
+        private long maxPtsInterval;
+        private long lastPtsAtPcr = -1;
         private long randomAccessPoints;
         private long packetsSinceRandomAccess = -1;
         private long erroredSeconds;
