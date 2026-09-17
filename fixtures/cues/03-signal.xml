@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tsduck>
+  <splice_information_table pts_adjustment="0" tier="0xFFF">
+    <time_signal pts_time="673200"/>
+  </splice_information_table>
+</tsduck>

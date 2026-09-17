@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tsduck>
+  <splice_information_table pts_adjustment="0" tier="0xFFF">
+    <time_signal pts_time="628200"/>
+    <splice_segmentation_descriptor segmentation_event_id="2001"
+        segmentation_type_id="0x35" segment_num="1" segments_expected="1">
+      <segmentation_upid type="0x03">414243443031323334353648</segmentation_upid>
+    </splice_segmentation_descriptor>
+  </splice_information_table>
+</tsduck>
