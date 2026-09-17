@@ -84,6 +84,22 @@ public final class TsAnalyzer {
     private static final long PTS_REPETITION_LIMIT = 27_000_000L * 700 / 1000;
 
     /**
+     * The longest gap between occurrences of a PSI table that ETSI TR 101 290
+     * allows: 500ms, for both the PAT and each PMT.
+     *
+     * <p>Priority 1, where the other two repetition limits are Priority 2 —
+     * without these tables a receiver cannot find the programs at all. It is
+     * still reported as conformance rather than damage, for the reason given on
+     * {@link TsStreamStats#isHealthy()}: when a gap is caused by loss, the loss
+     * is already counted where it happened.
+     *
+     * <p>Unlike PCR repetition, this one is quiet on ordinary streams. The
+     * fixtures here carry their tables every 117ms on average and 160ms at worst,
+     * comfortably inside the limit, so a breach means something.
+     */
+    private static final long TABLE_REPETITION_LIMIT = 27_000_000L * 500 / 1000;
+
+    /**
      * The full span of the PCR before it wraps: the base is 33 bits of 90 kHz,
      * and each base tick is 300 of the 27 MHz units this class works in
      * (§2.4.3.5). About 26.5 hours.
@@ -109,6 +125,18 @@ public final class TsAnalyzer {
     private long pcrDiscontinuities;
     private long pcrRepetitionErrors;
     private long ptsErrors;
+
+    /**
+     * How often the PAT arrives, and each PMT separately.
+     *
+     * <p>Measured on the reference clock rather than a per-program one. PSI is
+     * the multiplex's own scheduling: the muxer decides how often to emit these
+     * tables, and that decision is not a property of any one program's timeline.
+     * It also keeps the PAT — which belongs to no program by definition — and the
+     * PMTs on the same footing.
+     */
+    private final Repetition patSpacing = new Repetition(TABLE_REPETITION_LIMIT);
+    private final Map<Integer, Repetition> pmtSpacing = new LinkedHashMap<>();
 
     /**
      * One clock per PID that carries a PCR, which in practice means one per
@@ -288,6 +316,7 @@ public final class TsAnalyzer {
                 // would report tracks the stream is not carrying yet.
                 continue;
             }
+            trackTableRepetition(packet.pid());
             applySection(packet.pid(), section);
         }
     }
@@ -518,6 +547,45 @@ public final class TsAnalyzer {
     }
 
     /**
+     * Notes how long it has been since this table last arrived.
+     *
+     * <p>Counted on complete, current sections only, which means a section
+     * discarded for a bad CRC does not count as the table having arrived. That is
+     * the right reading: a receiver cannot use a table it had to throw away, so
+     * as far as it is concerned the table did not come.
+     */
+    private void trackTableRepetition(int pid) {
+        if (referenceClock == null || referenceClock.lastPcr < 0) {
+            return; // no clock yet, so there is no "how long"
+        }
+        Repetition spacing = pid == TsPacket.PAT_PID
+                ? patSpacing
+                : pmtSpacing.computeIfAbsent(pid, key -> new Repetition(TABLE_REPETITION_LIMIT));
+        long breach = spacing.at(referenceClock.lastPcr);
+        if (breach > 0) {
+            fire(listener -> listener.onTableRepetitionError(pid, breach));
+        }
+    }
+
+    /** Breaches summed across every PMT, which are tracked one per program. */
+    private long pmtRepetitionErrors() {
+        long total = 0;
+        for (Repetition spacing : pmtSpacing.values()) {
+            total += spacing.breaches;
+        }
+        return total;
+    }
+
+    /** The widest gap seen on any PSI table, PAT or PMT. */
+    private long widestTableInterval() {
+        long widest = patSpacing.widest;
+        for (Repetition spacing : pmtSpacing.values()) {
+            widest = Math.max(widest, spacing.widest);
+        }
+        return widest;
+    }
+
+    /**
      * Notes how much stream time passed since this track's previous PTS.
      *
      * <p>Measured against the program's clock rather than by subtracting one PTS
@@ -537,24 +605,10 @@ public final class TsAnalyzer {
         if (clock == null || clock.lastPcr < 0) {
             return; // this program has no clock yet, so there is no "when"
         }
-        long now = clock.lastPcr;
-        long previous = state.lastPtsAtPcr;
-        state.lastPtsAtPcr = now;
-        if (previous < 0) {
-            return; // the first PTS on this track begins the measurement
-        }
-
-        long delta = now - previous;
-        if (delta <= 0) {
-            return; // inside one PCR interval, or the clock went backwards
-        }
-        if (delta > state.maxPtsInterval) {
-            state.maxPtsInterval = delta;
-        }
-        if (delta > PTS_REPETITION_LIMIT) {
-            state.ptsErrors++;
+        long breach = state.ptsSpacing.at(clock.lastPcr);
+        if (breach > 0) {
             ptsErrors++;
-            fire(listener -> listener.onPtsRepetitionError(pid, delta));
+            fire(listener -> listener.onPtsRepetitionError(pid, breach));
         }
     }
 
@@ -567,16 +621,10 @@ public final class TsAnalyzer {
      * says by how much, which is what decides whether a receiver will cope.
      */
     private void trackPcrRepetition(int pid, PidState state, long delta) {
-        if (delta <= 0) {
-            return; // two PCRs in one packet's worth of time, or none passed
-        }
-        if (delta > state.maxPcrInterval) {
-            state.maxPcrInterval = delta;
-        }
-        if (delta > PCR_REPETITION_LIMIT) {
-            state.pcrRepetitionErrors++;
+        long breach = state.pcrSpacing.interval(delta);
+        if (breach > 0) {
             pcrRepetitionErrors++;
-            fire(listener -> listener.onPcrRepetitionError(pid, delta));
+            fire(listener -> listener.onPcrRepetitionError(pid, breach));
         }
     }
 
@@ -636,6 +684,63 @@ public final class TsAnalyzer {
     }
 
     /**
+     * How far apart repeated events are, against a limit.
+     *
+     * <p>Extracted because this is the fourth thing measured the same way — PCR
+     * spacing, PTS spacing, and now the PAT and each PMT. All four count
+     * breaches, keep the widest interval, and differ only in what they are
+     * measuring and how wide is too wide.
+     *
+     * <p>Two ways in, because the callers genuinely differ. Most know only
+     * <em>when</em> an event happened and let this work out the gap; PCR spacing
+     * arrives with its gap already computed, because folding a 33-bit wrap and
+     * excluding clock discontinuities has to happen where that context exists.
+     */
+    private static final class Repetition {
+
+        private final long limit;
+        private long lastAt = -1;
+        private long breaches;
+        private long widest;
+
+        Repetition(long limit) {
+            this.limit = limit;
+        }
+
+        /**
+         * Records an event at {@code now}.
+         *
+         * @return the interval if it breached the limit, otherwise 0
+         */
+        long at(long now) {
+            long previous = lastAt;
+            lastAt = now;
+            // The first event begins the measurement rather than being compared
+            // against a stream that had not started.
+            return previous < 0 ? 0 : interval(now - previous);
+        }
+
+        /**
+         * Records an interval whose width the caller already knows.
+         *
+         * @return the interval if it breached the limit, otherwise 0
+         */
+        long interval(long delta) {
+            if (delta <= 0) {
+                return 0; // finer than the clock can resolve, or time went backwards
+            }
+            if (delta > widest) {
+                widest = delta;
+            }
+            if (delta <= limit) {
+                return 0;
+            }
+            breaches++;
+            return delta;
+        }
+    }
+
+    /**
      * One program's notion of time, in whole seconds, taken from its PCR rather
      * than a wall clock.
      *
@@ -680,8 +785,8 @@ public final class TsAnalyzer {
             pids.add(new PidStats(state.pid, state.packets, state.bytes, state.continuityErrors,
                     state.packetsLost, state.transportErrors, state.duplicates, state.scrambled,
                     state.lastPcr, state.pcrCount, state.pcrDiscontinuities,
-                    state.pcrRepetitionErrors, state.maxPcrInterval,
-                    state.ptsErrors, state.maxPtsInterval,
+                    state.pcrSpacing.breaches, state.pcrSpacing.widest,
+                    state.ptsSpacing.breaches, state.ptsSpacing.widest,
                     state.pesPackets, state.lastPts, state.lastDts, state.streamId,
                     state.randomAccessPoints, state.packetsSinceRandomAccess,
                     state.erroredSeconds, state.damagedGops));
@@ -693,7 +798,8 @@ public final class TsAnalyzer {
         long observedSeconds = referenceClock == null ? 0 : referenceClock.observedSeconds();
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
                 transportErrors, duplicates, pesPackets, syncLosses, crcFailures,
-                pcrDiscontinuities, pcrRepetitionErrors, ptsErrors, erroredSeconds, observedSeconds,
+                pcrDiscontinuities, pcrRepetitionErrors, ptsErrors, patSpacing.breaches,
+                pmtRepetitionErrors(), widestTableInterval(), erroredSeconds, observedSeconds,
                 programMap,
                 List.copyOf(pids));
     }
@@ -726,11 +832,8 @@ public final class TsAnalyzer {
         private long lastPcr = -1;
         private long pcrCount;
         private long pcrDiscontinuities;
-        private long pcrRepetitionErrors;
-        private long maxPcrInterval;
-        private long ptsErrors;
-        private long maxPtsInterval;
-        private long lastPtsAtPcr = -1;
+        private final Repetition pcrSpacing = new Repetition(PCR_REPETITION_LIMIT);
+        private final Repetition ptsSpacing = new Repetition(PTS_REPETITION_LIMIT);
         private long randomAccessPoints;
         private long packetsSinceRandomAccess = -1;
         private long erroredSeconds;

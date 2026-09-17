@@ -20,7 +20,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -188,6 +190,29 @@ class PcrRepetitionTest {
         assertThat(analyzer.stats().pcrRepetitionErrors())
                 .as("the stream total sums both PIDs")
                 .isEqualTo(3);
+    }
+
+    /**
+     * The breach reaches a listener, with the PID and the gap that caused it.
+     *
+     * <p>The counters and the event are separate paths: a stat is read from the
+     * tracker, while the event is fired at the call site. Suppressing the event
+     * leaves every count correct, so only this notices.
+     */
+    @Test
+    void aBreachReachesAListener() {
+        List<String> seen = new ArrayList<>();
+        analyzer.addListener(new TsStreamListener() {
+            @Override
+            public void onPcrRepetitionError(int pid, long interval) {
+                seen.add(String.format("0x%04X %.0fms", pid, interval / 27000.0));
+            }
+        });
+
+        tick(CONFORMANT_STEP);
+        tick(FFMPEG_STEP);
+
+        assertThat(seen).containsExactly("0x0100 80ms");
     }
 
     // --- helpers

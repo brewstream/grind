@@ -96,6 +96,19 @@ public interface TsStreamListener {
     default void onPtsRepetitionError(int pid, long interval) {
     }
 
+    /**
+     * A gap between occurrences of a PSI table longer than TR 101 290's 500ms.
+     *
+     * <p>Priority 1: without these tables a receiver cannot find the programs.
+     * Quiet on ordinary streams, where a muxer emits them several times a second,
+     * so this is worth acting on rather than sampling.
+     *
+     * @param pid      the PAT's PID, or the PID of the PMT that was late
+     * @param interval the gap in 27 MHz units; divide by 27,000 for milliseconds
+     */
+    default void onTableRepetitionError(int pid, long interval) {
+    }
+
     default void onScramblingChanged(int pid, boolean scrambled) {
     }
 

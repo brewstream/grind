@@ -157,13 +157,13 @@ decodable", Priority 2 is "decodable but wrong", Priority 3 is optional.
 | `TS_sync_loss` | 1 | `syncLosses()` |
 | `Sync_byte_error` | 1 | `TsPacket.parse` returns `null` |
 | `Continuity_count_error` | 1 | `continuityErrors()`, per PID and per stream |
-| `PAT_error` / `PMT_error` — table present and parseable | 1 | partial: presence and CRC, **not the 0.5s repetition limit** |
+| `PAT_error` / `PMT_error` | 1 | presence, CRC, and the 0.5s repetition limit |
 | `Transport_error` | 2 | `transportErrors()` |
 | `CRC_error` | 2 | `crcErrors()` |
 | `PCR_discontinuity_indicator_error` | 2 | `pcrDiscontinuities()` |
 | `PID_error` — a referenced PID never appears | 3 | derivable: the PMT lists it, `stats.pid()` returns `null`. No timer |
 | `PCR_repetition_error` (40ms) | 2 | `pcrRepetitionErrors()`, `maxPcrIntervalMillis()` |
-| `PCR_accuracy_error` (±500ns) | 2 | **not implemented** |
+| `PCR_accuracy_error` (±500ns) | 2 | **parked**, see below |
 | `PTS_error` — PTS at least every 700ms | 2 | `ptsErrors()`, `maxPtsIntervalMillis()` |
 | `CAT_error`, scrambling checks | 2 | **not implemented** |
 
@@ -185,6 +185,13 @@ tolerance for jitter narrows. Folding that into errored seconds would report an
 ordinary, working stream as broken for every second of its duration, and the
 figure that was supposed to mean "for how long was this broken" would come to
 mean "for how long was this stream muxed by ffmpeg".
+
+The two table checks are treated the same way, and they are the closest call of
+the four because they are Priority 1 — without a PAT a receiver cannot find
+anything. What settles it: when a gap between tables *is* caused by loss, that
+loss already appears as continuity errors, counted where it happened. Including
+the gap as well would report one fault twice, and would flag a merely slow muxer
+as a damaged stream.
 
 `PTS_error` is treated the same way, and for the same reason: a track whose
 timestamps are sparse has lost nothing, it has only made presentation harder to
@@ -267,18 +274,39 @@ the work is comparison rather than new parsing. In order:
 - **`PCR_repetition_error`** (P2) — **done.** A PCR at least every 40ms, counted per
   PID with the widest interval kept alongside. Deliberately excluded from errored
   seconds and from `isHealthy()`; see below.
-- **`PCR_accuracy_error`** (P2) — ±500ns. Needs a rate model, so it is the
-  hardest of these and may land last.
+- **`PCR_accuracy_error`** (P2) — **parked.** See below.
 - **`PTS_error`** (P2) — **done.** A PTS at least every 700ms, per track, with the
   widest gap kept alongside. Measured against the program's clock rather than by
   subtracting timestamps: the standard asks how often a PTS *appears*, and PTS
   values run backwards with B-frames, so their difference answers a different
   question. Resolution is therefore the PCR interval — 80ms on a typical stream —
   which against a 700ms limit can never produce a false breach.
-- **PAT/PMT repetition** (P1) — tables at least every 0.5s.
+- **PAT/PMT repetition** (P1) — **done.** PAT and each PMT timed separately, counted
+  only on complete CRC-valid sections: a receiver cannot use a table it had to
+  discard, so a corrupt one does not count as having arrived.
 - **PTS-to-PCR skew** — not a TR 101 290 check, but the diagnostic those parts
   enable: audio drifting against video, and timestamps running far enough ahead
   of or behind the clock that a player starves or overflows.
+
+**Parked — `PCR_accuracy_error`.** The ±500ns check measures muxing jitter, and
+measuring it means relating byte position in the stream to time: derive the
+transport rate between two PCRs, then check whether each PCR sits where that rate
+says it should. That works on a constant-bitrate file. It does not work on what
+Grind actually consumes.
+
+- Over SRT the network has already added its own jitter, so timing at the
+  receiving socket describes the path rather than the muxer. The measurement
+  would be precise and about the wrong thing. Real probes take it at the source,
+  or on a CBR feed with hardware timestamping.
+- The fixtures here are variable-bitrate, so there is no honest test to write.
+- A figure that is always noisy teaches people to ignore the panel it sits on.
+  Three checks' worth of work has gone into making conformance and damage legible
+  apart from each other; one meaningless number would undo some of it.
+
+The trigger for un-parking is Grind growing a file-analysis mode, where the input
+is a complete CBR file and byte offsets mean something. If something is wanted in
+this space sooner, the honest version is PCR jitter measured against the stream's
+own average rate, named so it does not claim TR 101 290 conformance.
 
 **Parked — access-unit reassembly.** Collecting PES payload across TS packets
 into whole frames. Parked rather than dropped, and the reasons are worth stating

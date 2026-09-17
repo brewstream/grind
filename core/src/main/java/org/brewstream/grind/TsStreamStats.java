@@ -64,6 +64,16 @@ import java.util.List;
  *                         PTS_error.</b> Conformance rather than damage, so like
  *                         {@code pcrRepetitionErrors} it is kept out of {@link #isHealthy()}
  *                         and out of errored seconds
+ * @param patRepetitionErrors gaps between PATs longer than TR 101 290's 500ms.
+ *                         <b>Priority 1 PAT_error.</b> Without it a receiver cannot find
+ *                         the programs at all — but it is still reported apart from
+ *                         {@link #isHealthy()}, because a gap caused by loss is already
+ *                         counted as loss where it happened
+ * @param pmtRepetitionErrors the same for each program's PMT, summed. <b>Priority 1
+ *                         PMT_error.</b>
+ * @param maxTableInterval the widest gap seen on any PSI table in 27 MHz units. Quiet on
+ *                         ordinary streams: a muxer typically emits these several times a
+ *                         second, so unlike the PCR figure a large value means something
  * @param erroredSeconds   seconds of stream time containing at least one error. <b>The figure
  *                         a broadcast probe reports</b>, and the one that answers "for how long
  *                         was this broken" rather than "how many packets went missing".
@@ -89,6 +99,9 @@ public record TsStreamStats(
         long pcrDiscontinuities,
         long pcrRepetitionErrors,
         long ptsErrors,
+        long patRepetitionErrors,
+        long pmtRepetitionErrors,
+        long maxTableInterval,
         long erroredSeconds,
         long observedSeconds,
         ProgramMap programs,
@@ -104,6 +117,17 @@ public record TsStreamStats(
     }
 
     /**
+     * The widest gap between occurrences of any PSI table, in milliseconds.
+     *
+     * <p>More useful than the breach counts on their own: a muxer emits these
+     * several times a second, so this reading says how far from normal a stream
+     * is rather than merely that it crossed a line.
+     */
+    public double maxTableIntervalMillis() {
+        return maxTableInterval / (AdaptationField.PCR_RATE_HZ / 1000.0);
+    }
+
+    /**
      * Whether anything is wrong: loss, corruption, lost alignment, or a clock
      * that jumped without saying so. A clean stream answers {@code true}, which
      * is the common case and worth making cheap to check.
@@ -112,13 +136,19 @@ public record TsStreamStats(
      * a stream reporting healthy beside a non-zero errored-second count would be
      * contradicting itself on the same panel.
      *
-     * <p>{@code pcrRepetitionErrors} and {@code ptsErrors} are the deliberate
-     * exceptions, and the reason
+     * <p>The repetition checks — {@code pcrRepetitionErrors}, {@code ptsErrors},
+     * and the two table figures — are the deliberate exceptions, and the reason
      * is the distinction this method turns on: these count conditions under which
-     * <em>something was lost or corrupted</em>. A PCR or a PTS arriving later
-     * than the standard allows loses nothing — it makes the clock harder to
-     * recover and presentation harder to schedule. Both are worth reporting, and
-     * neither is this.
+     * <em>something was lost or corrupted</em>. A PCR, a PTS or a table arriving
+     * later than the standard allows loses nothing in itself — it makes the clock
+     * harder to recover, presentation harder to schedule, or a joining receiver
+     * slower to find the programs.
+     *
+     * <p>The table checks are Priority 1 and so the closest call of the four. The
+     * argument that settles it: when a gap between tables <em>is</em> caused by
+     * loss, that loss already shows here as continuity errors, counted at the
+     * point it happened. Including the gap as well would report one fault twice,
+     * and would also flag a merely slow muxer as a damaged stream.
      */
     public boolean isHealthy() {
         return continuityErrors == 0 && transportErrors == 0 && syncLosses == 0

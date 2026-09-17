@@ -21,7 +21,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -220,6 +222,26 @@ class PtsRepetitionTest {
         assertThat(stats.ptsErrors()).isPositive();
         assertThat(stats.isHealthy()).as("nothing was lost").isTrue();
         assertThat(stats.erroredSeconds()).as("and no second was errored").isZero();
+    }
+
+    /** The breach reaches a listener, with the track and the gap. */
+    @Test
+    void aBreachReachesAListener() {
+        List<String> seen = new ArrayList<>();
+        analyzer.addListener(new TsStreamListener() {
+            @Override
+            public void onPtsRepetitionError(int pid, long interval) {
+                seen.add(String.format("0x%04X %.0fms", pid, interval / 27000.0));
+            }
+        });
+
+        startClock();
+        pesWithPts(VIDEO_PID);
+        advanceClock(800);
+        pesWithPts(VIDEO_PID);
+
+        assertThat(seen).hasSize(1);
+        assertThat(seen.get(0)).startsWith("0x0100 8");
     }
 
     // --- helpers
