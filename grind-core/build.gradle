@@ -2,11 +2,11 @@ description = 'MPEG-TS inspection and demultiplexing for the JVM'
 
 // Deliberately no dependencies at all: a parser that owns no buffer type and no
 // framework is the easiest thing to drop into whatever a caller already has.
-// Netty integration lives in :netty so that choice stays the caller's.
+// Netty integration lives in :grind-netty so that choice stays the caller's.
 mavenPublishing {
-    coordinates(project.group.toString(), 'grind', project.version.toString())
+    coordinates(project.group.toString(), 'grind-core', project.version.toString())
     pom {
-        name = 'Grind'
+        name = 'Grind Core'
         description = project.description
     }
 }
