@@ -83,6 +83,12 @@ public final class TsAnalyzer {
      */
     private static final long PTS_REPETITION_LIMIT = 27_000_000L * 700 / 1000;
 
+    /** 27 MHz to the 90 kHz the timestamps use. */
+    private static final int PCR_TICKS_PER_TIMESTAMP = 300;
+
+    /** The 33-bit range PTS and the PCR base both wrap within. */
+    private static final long TIMESTAMP_WRAP_MAGNITUDE = 1L << 33;
+
     /**
      * The longest gap between occurrences of a PSI table that ETSI TR 101 290
      * allows: 500ms, for both the PAT and each PMT.
@@ -125,6 +131,7 @@ public final class TsAnalyzer {
     private long pcrDiscontinuities;
     private long pcrRepetitionErrors;
     private long ptsErrors;
+    private long lateTimestamps;
 
     /**
      * How often the PAT arrives, and each PMT separately.
@@ -268,6 +275,7 @@ public final class TsAnalyzer {
             // what the DTS exists to express. Recorded, not judged.
             state.lastPts = header.pts();
             trackPtsRepetition(packet.pid(), state);
+            trackPtsSkew(packet.pid(), state, header.pts());
         }
         if (header.hasDts()) {
             state.lastDts = header.dts();
@@ -613,6 +621,58 @@ public final class TsAnalyzer {
     }
 
     /**
+     * Records how far ahead of the clock this track's timestamp is.
+     *
+     * <p>A PTS says when a frame should be presented; the PCR says what time it
+     * is now. The difference is how long the decoder has to hold the frame before
+     * showing it, and therefore how much slack the stream is leaving. A healthy
+     * stream keeps this comfortably positive and steady.
+     *
+     * <p><b>Read it per track, never between tracks.</b> Video and audio sit at
+     * different skews as a matter of course — in every fixture here video runs
+     * around 720ms and audio around 410ms — because they are buffered and
+     * interleaved differently. That gap is not a lip-sync error, and treating a
+     * difference between tracks as one would condemn every working stream.
+     * Presentation alignment is what the timestamps themselves express; this
+     * measures arrival against deadline.
+     *
+     * <p>What matters is the <em>minimum</em>. Skew falling toward zero means data
+     * is arriving barely in time and the decoder's buffer is draining; at or below
+     * zero a frame is already due when it arrives, and a player must either stall
+     * or drop it.
+     */
+    private void trackPtsSkew(int pid, PidState state, long pts) {
+        Clock clock = clockOf(state);
+        if (clock == null || clock.lastPcr < 0) {
+            return;
+        }
+        long now = clock.lastPcr / PCR_TICKS_PER_TIMESTAMP;
+        long skew = pts - now;
+        // Both counts are 33-bit and wrap about every 26.5 hours. A skew larger
+        // than half that range is one of them having wrapped and not the other.
+        if (skew < -(TIMESTAMP_WRAP_MAGNITUDE / 2)) {
+            skew += TIMESTAMP_WRAP_MAGNITUDE;
+        } else if (skew > TIMESTAMP_WRAP_MAGNITUDE / 2) {
+            skew -= TIMESTAMP_WRAP_MAGNITUDE;
+        }
+
+        state.lastPtsSkew = skew;
+        if (!state.hasSkew || skew < state.minPtsSkew) {
+            state.minPtsSkew = skew;
+        }
+        if (!state.hasSkew || skew > state.maxPtsSkew) {
+            state.maxPtsSkew = skew;
+        }
+        state.hasSkew = true;
+        if (skew <= 0) {
+            long late = skew;
+            state.lateTimestamps++;
+            lateTimestamps++;
+            fire(listener -> listener.onLateTimestamp(pid, late));
+        }
+    }
+
+    /**
      * Notes how far apart two consecutive PCRs were, and whether that breached
      * TR 101 290's limit.
      *
@@ -820,6 +880,9 @@ public final class TsAnalyzer {
                     state.lastPcr, state.pcrCount, state.pcrDiscontinuities,
                     state.pcrSpacing.breaches, state.pcrSpacing.widest,
                     state.ptsSpacing.breaches, state.ptsSpacing.widest,
+                    state.hasSkew ? state.lastPtsSkew : Long.MIN_VALUE,
+                    state.hasSkew ? state.minPtsSkew : Long.MIN_VALUE,
+                    state.lateTimestamps,
                     state.pesPackets, state.lastPts, state.lastDts, state.streamId,
                     state.randomAccessPoints, state.packetsSinceRandomAccess,
                     state.erroredSeconds, state.damagedGops));
@@ -832,7 +895,8 @@ public final class TsAnalyzer {
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
                 transportErrors, duplicates, pesPackets, syncLosses, crcFailures,
                 pcrDiscontinuities, pcrRepetitionErrors, ptsErrors, patSpacing.breaches,
-                pmtRepetitionErrors(), widestTableInterval(), erroredSeconds, observedSeconds,
+                pmtRepetitionErrors(), widestTableInterval(), lateTimestamps, erroredSeconds,
+                observedSeconds,
                 programMap,
                 List.copyOf(pids));
     }
@@ -867,6 +931,11 @@ public final class TsAnalyzer {
         private long pcrDiscontinuities;
         private final Repetition pcrSpacing = new Repetition(PCR_REPETITION_LIMIT);
         private final Repetition ptsSpacing = new Repetition(PTS_REPETITION_LIMIT);
+        private long lastPtsSkew;
+        private long minPtsSkew;
+        private long maxPtsSkew;
+        private boolean hasSkew;
+        private long lateTimestamps;
         private long randomAccessPoints;
         private long packetsSinceRandomAccess = -1;
         private long erroredSeconds;

@@ -74,6 +74,11 @@ import java.util.List;
  * @param maxTableInterval the widest gap seen on any PSI table in 27 MHz units. Quiet on
  *                         ordinary streams: a muxer typically emits these several times a
  *                         second, so unlike the PCR figure a large value means something
+ * @param lateTimestamps   timestamps across every track that arrived at or after their own
+ *                         deadline. Not a TR 101 290 check and not counted against
+ *                         {@link #isHealthy()} — nothing was lost — but the clearest sign a
+ *                         stream will not play smoothly, since a decoder can only stall or
+ *                         drop a frame it is handed too late
  * @param erroredSeconds   seconds of stream time containing at least one error. <b>The figure
  *                         a broadcast probe reports</b>, and the one that answers "for how long
  *                         was this broken" rather than "how many packets went missing".
@@ -102,6 +107,7 @@ public record TsStreamStats(
         long patRepetitionErrors,
         long pmtRepetitionErrors,
         long maxTableInterval,
+        long lateTimestamps,
         long erroredSeconds,
         long observedSeconds,
         ProgramMap programs,

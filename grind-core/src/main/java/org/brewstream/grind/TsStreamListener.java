@@ -109,6 +109,20 @@ public interface TsStreamListener {
     default void onTableRepetitionError(int pid, long interval) {
     }
 
+    /**
+     * A timestamp that arrived at or after the moment it was due.
+     *
+     * <p>Not a conformance failure — the stream is well-formed — but the clearest
+     * sign it will not play smoothly, because a decoder handed a frame after its
+     * deadline can only stall or drop it. Worth acting on rather than sampling:
+     * on a healthy stream this never fires.
+     *
+     * @param skew how late, in 90 kHz units. Zero means it arrived exactly on its
+     *             deadline; negative means it was already overdue
+     */
+    default void onLateTimestamp(int pid, long skew) {
+    }
+
     default void onScramblingChanged(int pid, boolean scrambled) {
     }
 

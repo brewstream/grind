@@ -13,10 +13,12 @@ A companion module ships Netty handlers, so an SRT stream from
 [Roast](https://github.com/brewstream/roast) can be inspected by adding two
 handlers to a pipeline.
 
-**Status:** phase 1 complete. Packets, adaptation fields, PCR, PSI section
-assembly, PAT, PMT and PES headers are implemented and tested against real
-streams — enough to say what a stream contains, how it is timed, and whether it
-is healthy. See the roadmap for what is next.
+**Status:** phases 1 and 1b complete. Packets, adaptation fields, PCR, PSI
+section assembly, PAT, PMT, PES headers, per-program clocks and the TR 101 290
+timing checks are implemented and tested against real streams — enough to say
+what a stream contains, how it is timed, whether it conforms, and whether it will
+play. SCTE-35 splice information is read in `grind-scte`. See the roadmap for
+what is next.
 
 ## Requirements
 
@@ -166,6 +168,7 @@ decodable", Priority 2 is "decodable but wrong", Priority 3 is optional.
 | `PCR_repetition_error` (40ms) | 2 | `pcrRepetitionErrors()`, `maxPcrIntervalMillis()` |
 | `PCR_accuracy_error` (±500ns) | 2 | **parked**, see below |
 | `PTS_error` — PTS at least every 700ms | 2 | `ptsErrors()`, `maxPtsIntervalMillis()` |
+| *(not a TR 101 290 check)* PTS-to-PCR skew | — | `ptsSkewMillis()`, `minPtsSkewMillis()`, `lateTimestamps()` |
 | `CAT_error`, scrambling checks | 2 | **not implemented** |
 
 The unimplemented ones are all *timing* checks, and they share a reason: they
@@ -193,6 +196,12 @@ anything. What settles it: when a gap between tables *is* caused by loss, that
 loss already appears as continuity errors, counted where it happened. Including
 the gap as well would report one fault twice, and would flag a merely slow muxer
 as a damaged stream.
+
+PTS-to-PCR skew sits outside this split. It is not a conformance check at all —
+no standard defines a required slack — and it is not damage either, since nothing
+is lost. It is the one figure here that speaks to whether a stream will *play*
+rather than whether it is *correct*, which is why it is reported as a measurement
+with a minimum rather than as a pass or fail.
 
 `PTS_error` is treated the same way, and for the same reason: a track whose
 timestamps are sparse has lost nothing, it has only made presentation harder to
@@ -247,7 +256,7 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | Phase | Scope | State |
 |---|---|:---:|
 | **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; PES headers (PTS/DTS); continuity tracking; per-PID stats | **done** |
-| **1b — Clocks and timing** | Per-program clocks (**done**); PCR repetition and accuracy; PTS intervals and PTS-to-PCR skew; PAT/PMT repetition | **in progress** |
+| **1b — Clocks and timing** | Per-program clocks; PCR and PTS repetition; PAT/PMT repetition; PTS-to-PCR skew | **done** (PCR accuracy parked) |
 | **2 — Elementary streams** | PES payload reassembly into access units; frame boundaries from PES starts | **parked**, see below |
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
 | **SCTE-35** | splice information, read only, in `grind-scte` | **in progress**, see below |
@@ -286,9 +295,18 @@ the work is comparison rather than new parsing. In order:
 - **PAT/PMT repetition** (P1) — **done.** PAT and each PMT timed separately, counted
   only on complete CRC-valid sections: a receiver cannot use a table it had to
   discard, so a corrupt one does not count as having arrived.
-- **PTS-to-PCR skew** — not a TR 101 290 check, but the diagnostic those parts
-  enable: audio drifting against video, and timestamps running far enough ahead
-  of or behind the clock that a player starves or overflows.
+- **PTS-to-PCR skew** — **done.** How far ahead of the clock a track's timestamps
+  run, which is how much slack the stream leaves a decoder. Reported per track as
+  the current and the minimum gap, with a count of timestamps that arrived at or
+  past their own deadline.
+
+  One measurement shaped it, and contradicts what this line originally said.
+  Video runs at about 720ms of skew and audio at about 410ms **in every healthy
+  fixture**, because the two are buffered and interleaved differently. So a
+  difference between tracks is not lip-sync drift, and presenting it as one would
+  condemn every working stream. A track is compared against itself over time, and
+  the figure that matters is the minimum: slack falling toward zero means the
+  decoder's buffer is draining, and there is still time to act.
 
 ### SCTE-35: scope, and why it is its own module
 

@@ -51,6 +51,15 @@ package org.brewstream.grind;
  * @param maxPtsInterval    the widest of those gaps in 27 MHz units, or 0 before two PTS
  *                          have arrived. Resolution is the program's PCR interval, so this
  *                          reads 0 on a track carrying several PTS between two PCRs
+ * @param ptsSkew           how far ahead of the program clock this track's most recent
+ *                          timestamp was, in 90 kHz units, or {@link Long#MIN_VALUE} before
+ *                          one has been seen. How long a decoder must hold the frame before
+ *                          showing it, and so how much slack the stream is leaving
+ * @param minPtsSkew        the smallest that gap has been. The figure that matters: skew
+ *                          falling toward zero means data is arriving barely in time and the
+ *                          decoder's buffer is draining
+ * @param lateTimestamps    timestamps that arrived at or after their own deadline, which a
+ *                          player must either stall or drop
  * @param pesPackets        PES packets started on this PID. One frame per packet for video,
  *                          but audio commonly packs many frames into one, so this is a frame
  *                          count only for video and undercounts audio badly
@@ -88,6 +97,9 @@ public record PidStats(
         long maxPcrInterval,
         long ptsErrors,
         long maxPtsInterval,
+        long ptsSkew,
+        long minPtsSkew,
+        long lateTimestamps,
         long pesPackets,
         long lastPts,
         long lastDts,
@@ -105,6 +117,24 @@ public record PidStats(
     /** The widest gap between this track's PTS values in milliseconds. */
     public double maxPtsIntervalMillis() {
         return maxPtsInterval / (AdaptationField.PCR_RATE_HZ / 1000.0);
+    }
+
+    /**
+     * The most recent skew in milliseconds, or -1 before any timestamp.
+     *
+     * <p><b>Compare a track against itself over time, not against another
+     * track.</b> Video and audio sit at different skews as a matter of course —
+     * they are buffered and interleaved differently — and the gap between them is
+     * not a lip-sync error. Presentation alignment is what the timestamps
+     * themselves express; this measures arrival against deadline.
+     */
+    public double ptsSkewMillis() {
+        return ptsSkew == Long.MIN_VALUE ? -1 : ptsSkew / 90.0;
+    }
+
+    /** The smallest skew seen in milliseconds, or -1 before any timestamp. */
+    public double minPtsSkewMillis() {
+        return minPtsSkew == Long.MIN_VALUE ? -1 : minPtsSkew / 90.0;
     }
 
     /** Whether this PID carries the program clock. */
