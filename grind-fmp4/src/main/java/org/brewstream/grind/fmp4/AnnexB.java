@@ -31,14 +31,23 @@ import java.util.List;
  *
  * <p>Converting between them is not transcoding. No picture is decoded and no
  * bitstream is interpreted; the bytes inside each unit are untouched.
+ *
+ * <p><b>Codec-agnostic.</b> Start codes delimit units the same way in H.264 and
+ * H.265, but what a unit's header <em>means</em> differs — one byte and five bits
+ * of type in AVC, two bytes and six bits in HEVC. So this finds the units and
+ * leaves reading their types to the codec that knows.
  */
 public final class AnnexB {
 
     private AnnexB() {
     }
 
-    /** One NAL unit's position within an Annex B buffer. */
-    public record Nal(int offset, int length, int type) {
+    /**
+     * One NAL unit's position within an Annex B buffer.
+     *
+     * <p>No type: reading one means knowing the codec, and this does not.
+     */
+    public record Nal(int offset, int length) {
 
         /** The unit's bytes, copied out. */
         public byte[] copy(byte[] source) {
@@ -61,7 +70,7 @@ public final class AnnexB {
             int next = nextStartCode(data, payload);
             int end = next < 0 ? data.length : next;
             if (end > payload) {
-                units.add(new Nal(payload, end - payload, data[payload] & 0x1F));
+                units.add(new Nal(payload, end - payload));
             }
             at = next;
         }
@@ -69,31 +78,21 @@ public final class AnnexB {
     }
 
     /**
-     * Rewrites an Annex B buffer with four-byte length prefixes, dropping the
-     * parameter sets.
+     * Rewrites the given units with four-byte length prefixes.
      *
-     * <p>Parameter sets are dropped because they belong in {@code avcC} instead,
-     * and a decoder handed them twice is entitled to object. Access unit
-     * delimiters go too: they mark boundaries the length prefixes now make
-     * explicit.
-     *
-     * @return the length-prefixed form, or an empty array if nothing was left
+     * <p>Which units to include is the caller's decision, because it depends on
+     * the codec: parameter sets move into the configuration box and must not also
+     * travel in the samples, and the unit types that carry them differ.
      */
-    public static byte[] toLengthPrefixed(byte[] annexB) {
-        List<Nal> units = split(annexB);
+    public static byte[] lengthPrefix(byte[] annexB, List<Nal> units) {
         int size = 0;
         for (Nal nal : units) {
-            if (isCarried(nal.type())) {
-                size += 4 + nal.length();
-            }
+            size += 4 + nal.length();
         }
 
         byte[] out = new byte[size];
         int at = 0;
         for (Nal nal : units) {
-            if (!isCarried(nal.type())) {
-                continue;
-            }
             out[at] = (byte) ((nal.length() >>> 24) & 0xFF);
             out[at + 1] = (byte) ((nal.length() >>> 16) & 0xFF);
             out[at + 2] = (byte) ((nal.length() >>> 8) & 0xFF);
@@ -102,13 +101,6 @@ public final class AnnexB {
             at += 4 + nal.length();
         }
         return out;
-    }
-
-    /** Whether a picture carries this unit, or the init segment does. */
-    private static boolean isCarried(int type) {
-        return type != AvcParameterSets.NAL_SPS
-                && type != AvcParameterSets.NAL_PPS
-                && type != 9;  // access unit delimiter
     }
 
     private static int firstStartCode(byte[] data) {

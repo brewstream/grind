@@ -204,10 +204,24 @@ So the checks are layered instead:
 | `mp4fragment`, `MP4Box -info` | structure, against an independent fragmenter |
 | a browser | the last word, and the least informative |
 
-Parameter set extraction is already checked against the first of those: the
-sequence and picture parameter sets this module finds are byte-identical to the
-ones `mp4dump` reports in the reference muxer's `avcC`, as are the profile,
-compatibility and level bytes.
+The whole `avcC` box is already checked against the first of those: it is
+byte-identical to the one `mp4dump` reports in the reference muxer's output,
+parameter sets and all.
+
+**Codecs plug in.** `VideoCodec` is the entire per-codec surface — a sample entry
+name, a configuration box, a framing conversion, and how to recognise a keyframe.
+Everything above it is shared, so H.265 is a second implementation rather than
+edits scattered through the muxing code. H.264 and H.265 differ less than they
+look: both are NAL-based with parameter sets hoisted out of the samples, and they
+disagree only on NAL header size, how a type is read from it, which types carry
+configuration, and the shape of the configuration box. AV1 would be genuinely
+different — OBUs rather than NALs — and slots in at the same seam.
+
+One line had to be crossed. For the High profiles, and broadcast H.264 is almost
+always High, `avcC` carries four bytes of chroma format and bit depth that exist
+nowhere but inside the sequence parameter set's exp-golomb bitstream. So this
+module parses that much of it — the minimum, stopping at the last field it needs.
+The parameter set itself is still copied whole, and no picture is decoded.
 
 ### Conformance is not damage
 

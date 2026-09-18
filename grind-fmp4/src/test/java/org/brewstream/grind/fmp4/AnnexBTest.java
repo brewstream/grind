@@ -66,13 +66,150 @@ class AnnexBTest {
      */
     @Test
     void parameterSetsMatchWhatTheReferenceMuxerProduced() throws IOException {
-        AvcParameterSets sets = AvcParameterSets.from(elementaryStream());
+        AvcCodec codec = new AvcCodec();
+        codec.offer(elementaryStream());
 
-        assertThat(sets.isComplete()).isTrue();
-        assertThat(HexFormat.of().formatHex(sets.sequenceSets().get(0)))
+        assertThat(codec.isConfigured()).isTrue();
+        assertThat(HexFormat.of().formatHex(codec.sequenceSets().get(0)))
                 .isEqualTo(REFERENCE_SPS);
-        assertThat(HexFormat.of().formatHex(sets.pictureSets().get(0)))
+        assertThat(HexFormat.of().formatHex(codec.pictureSets().get(0)))
                 .isEqualTo(REFERENCE_PPS);
+    }
+
+    /**
+     * Parameter sets repeat ahead of every keyframe, and identical ones are held
+     * once.
+     *
+     * <p>{@code bframes.h264} carries five copies of each. A collector that kept
+     * them all would write five identical sequence parameter sets into
+     * {@code avcC} — valid, wasteful, and not what the reference produces.
+     */
+    @Test
+    void repeatedParameterSetsAreHeldOnce() throws IOException {
+        AvcCodec codec = new AvcCodec();
+        codec.offer(elementaryStream());
+
+        assertThat(codec.sequenceSets()).hasSize(1);
+        assertThat(codec.pictureSets()).hasSize(1);
+    }
+
+    /**
+     * The whole configuration box, byte for byte against the reference muxer's.
+     *
+     * <p>Read out of ffmpeg's own output with a hex dump rather than paraphrased
+     * from the specification, so a box that is merely plausible fails.
+     *
+     * <p>The trailing {@code fff8f800} is the extension High profiles carry:
+     * chroma 4:4:4, eight-bit luma and chroma, no parameter set extensions. Those
+     * values exist only inside the sequence parameter set's bitstream, which is
+     * why this module parses it at all.
+     */
+    @Test
+    void theConfigurationBoxMatchesTheReference() throws IOException {
+        AvcCodec codec = new AvcCodec();
+        codec.offer(elementaryStream());
+
+        BoxWriter out = new BoxWriter();
+        codec.writeConfiguration(out);
+
+        assertThat(HexFormat.of().formatHex(out.toByteArray())).isEqualTo(
+                "00000036"                 // box length: 8 + 46
+                        + "61766343"       // "avcC"
+                        + "01f4000d"       // version 1, profile 244, compat 0, level 13
+                        + "ff"             // four-byte length prefixes
+                        + "e1"             // one sequence parameter set
+                        + "0019" + REFERENCE_SPS
+                        + "01"             // one picture parameter set
+                        + "0006" + REFERENCE_PPS
+                        + "fff8f800");     // chroma 4:4:4, 8-bit, no extensions
+    }
+
+    /** Baseline and Main carry no extension, and their bitstream is left unread. */
+    @Test
+    void profilesWithoutTheExtensionAreNotParsed() {
+        assertThat(SequenceParameterSet.profileHasExtension(244)).as("High 4:4:4").isTrue();
+        assertThat(SequenceParameterSet.profileHasExtension(100)).as("High").isTrue();
+        assertThat(SequenceParameterSet.profileHasExtension(77)).as("Main").isFalse();
+        assertThat(SequenceParameterSet.profileHasExtension(66)).as("Baseline").isFalse();
+    }
+
+    /**
+     * The escape bytes are removed wherever they fall, not only where this
+     * fixture happens to put them.
+     *
+     * <p>Tested on the transformation directly because the fixture cannot reach
+     * it: its escape sequences sit after every field {@code avcC} needs, so
+     * skipping the strip entirely still yields the right answer for this one
+     * stream. A parameter set with an escape among the early fields would decode
+     * to plausible nonsense instead — and hand-crafting bytes is safe here, since
+     * removing {@code 03} after two zeroes is a mechanical rule rather than an
+     * interpretation.
+     */
+    @Test
+    void escapeBytesAreRemovedWhereverTheyFall() {
+        // from = 0 so the whole input is scanned.
+        assertThat(SequenceParameterSet.removeEmulationPrevention(
+                HexFormat.of().parseHex("00000300"), 0))
+                .as("the 03 between two zeroes and a zero")
+                .containsExactly(0x00, 0x00, 0x00);
+
+        assertThat(SequenceParameterSet.removeEmulationPrevention(
+                HexFormat.of().parseHex("aabb000003cc"), 0))
+                .containsExactly(0xAA, 0xBB, 0x00, 0x00, 0xCC);
+
+        assertThat(SequenceParameterSet.removeEmulationPrevention(
+                HexFormat.of().parseHex("0003"), 0))
+                .as("one zero is not two, so this 03 is payload")
+                .containsExactly(0x00, 0x03);
+
+        assertThat(SequenceParameterSet.removeEmulationPrevention(
+                HexFormat.of().parseHex("00000003000003"), 0))
+                .as("the counter resets after each removal")
+                .containsExactly(0x00, 0x00, 0x00, 0x00, 0x00);
+
+        assertThat(SequenceParameterSet.removeEmulationPrevention(
+                HexFormat.of().parseHex("ffff000003aa"), 2))
+                .as("scanning starts where it is told to, past the two ff bytes")
+                .containsExactly(0x00, 0x00, 0xAA);
+    }
+
+    /**
+     * The bytes inserted to stop payload imitating a start code are removed
+     * before the bitstream is read.
+     *
+     * <p>The fixture's own parameter set contains two such sequences. Reading them
+     * as bitstream shifts every field after the first and yields a plausible wrong
+     * answer rather than an error — this one decodes to 4:4:4 and eight bits,
+     * which is what the reference independently reports.
+     */
+    @Test
+    void emulationPreventionIsStrippedBeforeParsing() throws IOException {
+        AvcCodec codec = new AvcCodec();
+        codec.offer(elementaryStream());
+        byte[] sps = codec.sequenceSets().get(0);
+
+        assertThat(HexFormat.of().formatHex(sps))
+                .as("the fixture really does contain the escape sequence")
+                .contains("000003");
+
+        SequenceParameterSet parsed = SequenceParameterSet.parse(sps);
+        assertThat(parsed.chromaFormat()).as("4:4:4").isEqualTo(3);
+        assertThat(parsed.bitDepthLumaMinus8()).isZero();
+        assertThat(parsed.bitDepthChromaMinus8()).isZero();
+    }
+
+    /** Keyframes are found from the bitstream, not from the transport stream's flag. */
+    @Test
+    void randomAccessIsReadFromTheBitstream() throws IOException {
+        AvcCodec codec = new AvcCodec();
+        byte[] es = elementaryStream();
+
+        assertThat(codec.isRandomAccess(es))
+                .as("the whole stream contains IDR slices")
+                .isTrue();
+        assertThat(codec.isRandomAccess(HexFormat.of().parseHex("0000000141aabb")))
+                .as("a non-IDR slice is not one")
+                .isFalse();
     }
 
     /**
@@ -84,11 +221,13 @@ class AnnexBTest {
      */
     @Test
     void profileAndLevelComeStraightFromTheSequenceParameterSet() throws IOException {
-        byte[] profileLevel = AvcParameterSets.from(elementaryStream()).profileLevel();
+        AvcCodec codec = new AvcCodec();
+        codec.offer(elementaryStream());
+        byte[] sps = codec.sequenceSets().get(0);
 
-        assertThat(profileLevel[0] & 0xFF).as("profile").isEqualTo(244);
-        assertThat(profileLevel[1] & 0xFF).as("compatibility").isZero();
-        assertThat(profileLevel[2] & 0xFF).as("level").isEqualTo(13);
+        assertThat(sps[1] & 0xFF).as("profile").isEqualTo(244);
+        assertThat(sps[2] & 0xFF).as("compatibility").isZero();
+        assertThat(sps[3] & 0xFF).as("level").isEqualTo(13);
     }
 
     /**
@@ -101,9 +240,10 @@ class AnnexBTest {
      */
     @Test
     void aRealStreamSplitsIntoTheUnitsItShould() throws IOException {
+        byte[] es = elementaryStream();
         Map<Integer, Integer> byType = new TreeMap<>();
-        for (AnnexB.Nal nal : AnnexB.split(elementaryStream())) {
-            byType.merge(nal.type(), 1, Integer::sum);
+        for (AnnexB.Nal nal : AnnexB.split(es)) {
+            byType.merge(AvcCodec.typeOf(es, nal), 1, Integer::sum);
         }
 
         assertThat(byType.get(9)).as("access unit delimiters, one per picture").isEqualTo(50);
@@ -129,8 +269,8 @@ class AnnexBTest {
         List<AnnexB.Nal> units = AnnexB.split(mixed);
 
         assertThat(units).hasSize(2);
-        assertThat(units.get(0).type()).as("0x65 is a slice, type 5").isEqualTo(5);
-        assertThat(units.get(1).type()).as("0x06 is SEI, type 6").isEqualTo(6);
+        assertThat(AvcCodec.typeOf(mixed, units.get(0))).as("0x65 is a slice, type 5").isEqualTo(5);
+        assertThat(AvcCodec.typeOf(mixed, units.get(1))).as("0x06 is SEI, type 6").isEqualTo(6);
         assertThat(units.get(0).copy(mixed)).startsWith((byte) 0x65);
         assertThat(units.get(1).copy(mixed)).startsWith((byte) 0x06);
     }
@@ -140,7 +280,7 @@ class AnnexBTest {
     void lengthPrefixesReplaceStartCodes() {
         byte[] annexB = HexFormat.of().parseHex("00000001" + "65aabbcc");
 
-        byte[] prefixed = AnnexB.toLengthPrefixed(annexB);
+        byte[] prefixed = new AvcCodec().sample(annexB);
 
         assertThat(prefixed).containsExactly(
                 0x00, 0x00, 0x00, 0x04,   // four bytes follow
@@ -163,7 +303,7 @@ class AnnexBTest {
                         + "00000001" + "68ce"        // PPS
                         + "00000001" + "65aabb");    // the picture itself
 
-        byte[] prefixed = AnnexB.toLengthPrefixed(annexB);
+        byte[] prefixed = new AvcCodec().sample(annexB);
 
         assertThat(prefixed).containsExactly(
                 0x00, 0x00, 0x00, 0x03,
@@ -173,7 +313,7 @@ class AnnexBTest {
     /** Every picture in a real stream survives the rewrite with its bytes intact. */
     @Test
     void rewritingARealStreamKeepsEverySlice() throws IOException {
-        byte[] prefixed = AnnexB.toLengthPrefixed(elementaryStream());
+        byte[] prefixed = new AvcCodec().sample(elementaryStream());
 
         int units = 0;
         int at = 0;
