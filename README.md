@@ -31,7 +31,7 @@ Two artifacts:
 | `grind-core` | parser and analyzer | none |
 | `grind-netty` | pipeline handlers | Netty |
 | `grind-scte` | SCTE-35 splice information | `grind-core` |
-| `grind-fmp4` | repackaging as fragmented MP4 (in progress) | `grind-core` |
+| `grind-fmp4` | repackaging as fragmented MP4 | `grind-core` |
 
 **Not yet published.** Consume as a Gradle composite build until a release is cut:
 
@@ -183,6 +183,21 @@ can play. It is **not transcoding**: the coded pictures pass through untouched
 and only the container changes, so the cost is negligible and nothing is
 re-encoded.
 
+**Video is complete.** A transport stream in, a file two independent tools accept
+out. GPAC reads five fragments and fifty samples over two seconds; ffprobe
+decodes all fifty frames at 320x240. The decisive check is that **every
+presentation time, decode time and keyframe flag ffprobe reads back is identical
+to what it reads from the source transport stream** — for both fixtures. Frames
+decoded means the pictures survived, and timestamps identical means the timing
+did.
+
+Fragments begin at keyframes, which is where a player may join and — not
+coincidentally — exactly the unit MoQ wants for a group. Both are answering the
+same question: where can somebody start?
+
+Audio is next: an AAC track alongside, which for MoQ is a separate track rather
+than something to multiplex.
+
 Be aware that this is packager territory — the container transform at the centre
 of what Shaka Packager and Bento4 do. The parts that make a packager large are
 absent, because MoQ has no manifests, no segment addressing, no DRM and no ABR
@@ -318,7 +333,7 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
 | **SCTE-35** | splice information, read only, in `grind-scte` | **in progress**, see below |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
-| **fMP4** | repackaging access units as fragmented MP4, in `grind-fmp4` | **in progress** |
+| **fMP4** | repackaging access units as fragmented MP4, in `grind-fmp4` | **video done**, audio next |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
 
 Phases 4 and 5 are genuinely optional and exist so the boundary is written down.
