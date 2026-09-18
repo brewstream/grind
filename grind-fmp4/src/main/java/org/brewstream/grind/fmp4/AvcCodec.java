@@ -149,6 +149,16 @@ public final class AvcCodec implements VideoCodec {
         return false;
     }
 
+    @Override
+    public int width() {
+        return SequenceParameterSet.parse(sequenceSets.get(0)).width();
+    }
+
+    @Override
+    public int height() {
+        return SequenceParameterSet.parse(sequenceSets.get(0)).height();
+    }
+
     /** The sequence parameter sets held, for inspection and testing. */
     public List<byte[]> sequenceSets() {
         return List.copyOf(sequenceSets);

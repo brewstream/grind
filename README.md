@@ -217,11 +217,20 @@ disagree only on NAL header size, how a type is read from it, which types carry
 configuration, and the shape of the configuration box. AV1 would be genuinely
 different — OBUs rather than NALs — and slots in at the same seam.
 
-One line had to be crossed. For the High profiles, and broadcast H.264 is almost
-always High, `avcC` carries four bytes of chroma format and bit depth that exist
-nowhere but inside the sequence parameter set's exp-golomb bitstream. So this
-module parses that much of it — the minimum, stopping at the last field it needs.
-The parameter set itself is still copied whole, and no picture is decoded.
+One line had to be crossed, twice over. For the High profiles — and broadcast
+H.264 is almost always High — `avcC` carries four bytes of chroma format and bit
+depth that exist nowhere but inside the sequence parameter set's exp-golomb
+bitstream. And the picture dimensions the track header needs are further along
+the same bitstream, behind a scaling matrix that has to be walked to get past.
+So this module parses a sequence parameter set, stopping at the last field it
+needs. The parameter set itself is still copied whole and no picture is decoded.
+
+**Cropping is why dimensions cannot be guessed.** A coded picture is a whole
+number of macroblocks, so 1080p is coded as 1088 rows and cropped to 1080.
+Ignoring the crop reports every 1080p stream eight rows too tall, and a player
+that believes it stretches the picture. `cropped.ts` exists to hold that case:
+320x180 is eleven and a quarter macroblocks high, and the reference muxer agrees
+the answer is 180.
 
 ### Conformance is not damage
 
@@ -539,6 +548,7 @@ fixtures, each there because the others cannot show something:
 | `bframes.ts` | reordered frames, so a real DTS that differs from the PTS |
 | `multiprogram.ts` | two programs, two PMTs on separate PIDs, four tracks |
 | `splice.ts` | SCTE-35 ad markers, both signalling styles |
+| `cropped.ts` | a height that is not a whole number of macroblocks, so the picture is cropped |
 | `sample.h264`, `bframes.h264` | the same elementary streams as ffmpeg extracts them |
 
 Expectations are cross-checked against what `ffprobe` and TSDuck independently

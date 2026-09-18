@@ -76,6 +76,20 @@ public interface VideoCodec {
     byte[] sample(byte[] accessUnit);
 
     /**
+     * The coded picture width in luma samples.
+     *
+     * <p>Carried in the track header and the sample entry. It is not in the
+     * transport stream anywhere — only inside the codec's own configuration — so
+     * finding it is the codec's job and not a fragmenter's.
+     *
+     * @throws IllegalStateException if {@link #isConfigured()} is false
+     */
+    int width();
+
+    /** The coded picture height in luma samples. */
+    int height();
+
+    /**
      * Whether a decoder could begin at this access unit.
      *
      * <p>Read from the bitstream's own unit types rather than from the transport

@@ -44,12 +44,17 @@ final class SequenceParameterSet {
     private final int bitDepthLumaMinus8;
     private final int bitDepthChromaMinus8;
     private final boolean hasExtension;
+    private final int width;
+    private final int height;
 
-    private SequenceParameterSet(int chromaFormat, int luma, int chroma, boolean hasExtension) {
+    private SequenceParameterSet(int chromaFormat, int luma, int chroma, boolean hasExtension,
+            int width, int height) {
         this.chromaFormat = chromaFormat;
         this.bitDepthLumaMinus8 = luma;
         this.bitDepthChromaMinus8 = chroma;
         this.hasExtension = hasExtension;
+        this.width = width;
+        this.height = height;
     }
 
     /** Whether this profile's configuration box carries the extension at all. */
@@ -69,22 +74,100 @@ final class SequenceParameterSet {
      */
     static SequenceParameterSet parse(byte[] sps) {
         int profile = sps[1] & 0xFF;
-        if (!profileHasExtension(profile)) {
-            // Baseline and Main carry no extension, so nothing here is needed and
-            // the bitstream is left unread.
-            return new SequenceParameterSet(0, 0, 0, false);
-        }
+        boolean extended = profileHasExtension(profile);
 
         // Past the NAL header, profile, constraint flags and level.
         BitReader bits = new BitReader(removeEmulationPrevention(sps, 4));
         bits.unsignedExpGolomb();                       // seq_parameter_set_id
-        int chromaFormat = bits.unsignedExpGolomb();
-        if (chromaFormat == 3) {
-            bits.bit();                                 // separate_colour_plane_flag
+
+        int chromaFormat = 1;                           // 4:2:0 unless said otherwise
+        int luma = 0;
+        int chroma = 0;
+        if (extended) {
+            chromaFormat = bits.unsignedExpGolomb();
+            if (chromaFormat == 3) {
+                bits.bit();                             // separate_colour_plane_flag
+            }
+            luma = bits.unsignedExpGolomb();
+            chroma = bits.unsignedExpGolomb();
+            bits.bit();                                 // qpprime_y_zero_transform_bypass_flag
+            if (bits.bit() == 1) {
+                skipScalingMatrix(bits, chromaFormat);
+            }
         }
-        int luma = bits.unsignedExpGolomb();
-        int chroma = bits.unsignedExpGolomb();
-        return new SequenceParameterSet(chromaFormat, luma, chroma, true);
+
+        bits.unsignedExpGolomb();                       // log2_max_frame_num_minus4
+        int pictureOrderType = bits.unsignedExpGolomb();
+        if (pictureOrderType == 0) {
+            bits.unsignedExpGolomb();                   // log2_max_pic_order_cnt_lsb_minus4
+        } else if (pictureOrderType == 1) {
+            bits.bit();                                 // delta_pic_order_always_zero_flag
+            bits.signedExpGolomb();                     // offset_for_non_ref_pic
+            bits.signedExpGolomb();                     // offset_for_top_to_bottom_field
+            int cycle = bits.unsignedExpGolomb();
+            for (int i = 0; i < cycle; i++) {
+                bits.signedExpGolomb();                 // offset_for_ref_frame
+            }
+        }
+        bits.unsignedExpGolomb();                       // max_num_ref_frames
+        bits.bit();                                     // gaps_in_frame_num_value_allowed_flag
+
+        int widthInMacroblocks = bits.unsignedExpGolomb() + 1;
+        int heightInMapUnits = bits.unsignedExpGolomb() + 1;
+        int frameMbsOnly = bits.bit();
+        if (frameMbsOnly == 0) {
+            bits.bit();                                 // mb_adaptive_frame_field_flag
+        }
+        bits.bit();                                     // direct_8x8_inference_flag
+
+        int cropLeft = 0;
+        int cropRight = 0;
+        int cropTop = 0;
+        int cropBottom = 0;
+        if (bits.bit() == 1) {                          // frame_cropping_flag
+            cropLeft = bits.unsignedExpGolomb();
+            cropRight = bits.unsignedExpGolomb();
+            cropTop = bits.unsignedExpGolomb();
+            cropBottom = bits.unsignedExpGolomb();
+        }
+
+        // Cropping is counted in chroma samples, so how many luma samples each
+        // unit is worth depends on the sampling. A 4:2:0 picture crops two luma
+        // columns per unit; a 4:4:4 one crops a single column.
+        int cropUnitX = chromaFormat == 3 ? 1 : 2;
+        int cropUnitY = (chromaFormat == 1 ? 2 : 1) * (2 - frameMbsOnly);
+
+        int width = widthInMacroblocks * 16 - (cropLeft + cropRight) * cropUnitX;
+        int height = (2 - frameMbsOnly) * heightInMapUnits * 16
+                - (cropTop + cropBottom) * cropUnitY;
+
+        return new SequenceParameterSet(chromaFormat, luma, chroma, extended, width, height);
+    }
+
+    /**
+     * Steps over the scaling lists without reading them.
+     *
+     * <p>They describe quantisation, which matters to a decoder and not at all to
+     * a container. Skipping them still means walking them: each list is a run of
+     * exp-golomb deltas whose length is only known by reading it, so there is no
+     * offset to jump to.
+     */
+    private static void skipScalingMatrix(BitReader bits, int chromaFormat) {
+        int lists = chromaFormat == 3 ? 12 : 8;
+        for (int i = 0; i < lists; i++) {
+            if (bits.bit() == 0) {
+                continue;                               // this list is not present
+            }
+            int size = i < 6 ? 16 : 64;
+            int last = 8;
+            int next = 8;
+            for (int j = 0; j < size; j++) {
+                if (next != 0) {
+                    next = (last + bits.signedExpGolomb() + 256) % 256;
+                }
+                last = next == 0 ? last : next;
+            }
+        }
     }
 
     boolean hasExtension() {
@@ -101,6 +184,16 @@ final class SequenceParameterSet {
 
     int bitDepthChromaMinus8() {
         return bitDepthChromaMinus8;
+    }
+
+    /** The coded width in luma samples, after cropping. */
+    int width() {
+        return width;
+    }
+
+    /** The coded height in luma samples, after cropping. */
+    int height() {
+        return height;
     }
 
     /**
@@ -142,6 +235,12 @@ final class SequenceParameterSet {
             int value = (data[at >>> 3] >>> (7 - (at & 7))) & 1;
             at++;
             return value;
+        }
+
+        /** A signed exp-golomb value, which zigzags around zero as the format does. */
+        int signedExpGolomb() {
+            int value = unsignedExpGolomb();
+            return (value & 1) == 1 ? (value + 1) / 2 : -(value / 2);
         }
 
         /**
