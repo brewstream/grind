@@ -30,9 +30,8 @@ package org.brewstream.grind.fmp4;
  * The tables stay because the format requires them, holding zero entries, and
  * {@code mvex} says the real information arrives later in fragments.
  *
- * <p>The timescale is 90 kHz throughout, matching the transport stream's own
- * clock. Rescaling would introduce rounding into every timestamp for no benefit,
- * and the reference muxer makes the same choice.
+ * <p>Video uses the transport stream's 90 kHz clock. Audio uses its sample rate,
+ * so each AAC-LC frame lasts exactly 1024 ticks without accumulated rounding.
  */
 public final class InitSegment {
 
@@ -54,9 +53,37 @@ public final class InitSegment {
             throw new IllegalStateException(
                     "the codec has not seen enough configuration to describe a track");
         }
-        int width = codec.width();
-        int height = codec.height();
+        return build(new Track(codec, null, trackId));
+    }
 
+    /** Builds an init segment for one configured AAC track. */
+    public static byte[] forAudio(AacCodec codec, int trackId) {
+        return build(new Track(null, codec, trackId));
+    }
+
+    /** Builds a file header describing separate video and audio tracks. */
+    public static byte[] forAudioVideo(VideoCodec video, int videoId, AacCodec audio, int audioId) {
+        if (videoId == audioId) {
+            throw new IllegalArgumentException("track identifiers must be distinct");
+        }
+        return build(new Track(video, null, videoId), new Track(null, audio, audioId));
+    }
+
+    private record Track(VideoCodec video, AacCodec audio, int id) {
+    }
+
+    private static byte[] build(Track... tracks) {
+        int nextTrackId = 1;
+        for (Track track : tracks) {
+            if (track.id() <= 0 || track.id() == Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("track id must be positive and leave room for the next id");
+            }
+            if (track.video() != null ? !track.video().isConfigured() : !track.audio().isConfigured()) {
+                throw new IllegalStateException("track codec is not configured");
+            }
+            nextTrackId = Math.max(nextTrackId, track.id() + 1);
+        }
+        final int nextId = nextTrackId;
         BoxWriter out = new BoxWriter();
         out.box("ftyp", ftyp -> ftyp
                 .type("isom").u32(0x200)
@@ -72,80 +99,104 @@ public final class InitSegment {
                     .zeros(2 + 8)               // reserved
                     .bytes(unityMatrix())
                     .zeros(24)                  // predefined
-                    .u32(trackId + 1));         // the next free track id
+                    .u32(nextId));         // the next free track id
 
-            moov.box("trak", trak -> {
-                // Flags 3: the track is enabled and is part of the presentation.
-                trak.fullBox("tkhd", 0, 3, tkhd -> tkhd
-                        .u32(0).u32(0)          // created, modified
-                        .u32(trackId)
-                        .zeros(4)               // reserved
-                        .u32(0)                 // duration
-                        .zeros(8)               // reserved
-                        .u16(0)                 // layer
-                        .u16(0)                 // alternate group
-                        .u16(0)                 // volume: silent, this is video
-                        .zeros(2)
-                        .bytes(unityMatrix())
-                        .fixed16_16(width)
-                        .fixed16_16(height));
+            for (Track track : tracks) {
+                VideoCodec codec = track.video();
+                AacCodec audio = track.audio();
+                int trackId = track.id();
+                int width = codec == null ? 0 : codec.width();
+                int height = codec == null ? 0 : codec.height();
+                moov.box("trak", trak -> {
+                    // Flags 3: the track is enabled and is part of the presentation.
+                    trak.fullBox("tkhd", 0, 3, tkhd -> tkhd
+                            .u32(0).u32(0)          // created, modified
+                            .u32(trackId)
+                            .zeros(4)               // reserved
+                            .u32(0)                 // duration
+                            .zeros(8)               // reserved
+                            .u16(0)                 // layer
+                            .u16(0)                 // alternate group
+                            .u16(audio == null ? 0 : 0x0100) // audio volume
+                            .zeros(2)
+                            .bytes(unityMatrix())
+                            .fixed16_16(width)
+                            .fixed16_16(height));
 
-                trak.box("mdia", mdia -> {
-                    mdia.fullBox("mdhd", 0, 0, mdhd -> mdhd
-                            .u32(0).u32(0)
-                            .u32(TIMESCALE)
-                            .u32(0)             // duration
-                            .u16(0x55C4)        // language: "und"
-                            .u16(0));
-                    mdia.fullBox("hdlr", 0, 0, hdlr -> hdlr
-                            .u32(0)
-                            .type("vide")
-                            .zeros(12)
-                            .bytes("VideoHandler".getBytes(java.nio.charset.StandardCharsets.US_ASCII))
-                            .u8(0));
+                    trak.box("mdia", mdia -> {
+                        mdia.fullBox("mdhd", 0, 0, mdhd -> mdhd
+                                .u32(0).u32(0)
+                                .u32(audio == null ? TIMESCALE : audio.sampleRate())
+                                .u32(0)             // duration
+                                .u16(0x55C4)        // language: "und"
+                                .u16(0));
+                        mdia.fullBox("hdlr", 0, 0, hdlr -> hdlr
+                                .u32(0)
+                                .type(audio == null ? "vide" : "soun")
+                                .zeros(12)
+                                .bytes((audio == null ? "VideoHandler" : "SoundHandler")
+                                        .getBytes(java.nio.charset.StandardCharsets.US_ASCII))
+                                .u8(0));
 
-                    mdia.box("minf", minf -> {
-                        minf.fullBox("vmhd", 0, 1, vmhd -> vmhd.u16(0).zeros(6));
-                        minf.box("dinf", dinf -> dinf.fullBox("dref", 0, 0, dref -> {
-                            dref.u32(1);
-                            // Flags 1: the media is in this file, so there is no
-                            // location to record.
-                            dref.fullBox("url ", 0, 1, url -> { });
-                        }));
-                        minf.box("stbl", stbl -> {
-                            stbl.fullBox("stsd", 0, 0, stsd -> {
-                                stsd.u32(1);
-                                stsd.box(codec.sampleEntryType(), entry -> {
-                                    entry.zeros(6).u16(1);      // reserved, data reference index
-                                    entry.zeros(16);            // predefined and reserved
-                                    entry.u16(width).u16(height);
-                                    entry.u32(0x00480000).u32(0x00480000);  // 72 dpi
-                                    entry.u32(0);               // reserved
-                                    entry.u16(1);               // frame count
-                                    entry.zeros(32);            // compressor name
-                                    entry.u16(0x0018);          // depth
-                                    entry.u16(0xFFFF);          // predefined, -1
-                                    codec.writeConfiguration(entry);
+                        mdia.box("minf", minf -> {
+                            if (audio == null) {
+                                minf.fullBox("vmhd", 0, 1, vmhd -> vmhd.u16(0).zeros(6));
+                            } else {
+                                minf.fullBox("smhd", 0, 0, smhd -> smhd.u16(0).u16(0));
+                            }
+                            minf.box("dinf", dinf -> dinf.fullBox("dref", 0, 0, dref -> {
+                                dref.u32(1);
+                                // Flags 1: the media is in this file, so there is no
+                                // location to record.
+                                dref.fullBox("url ", 0, 1, url -> { });
+                            }));
+                            minf.box("stbl", stbl -> {
+                                stbl.fullBox("stsd", 0, 0, stsd -> {
+                                    stsd.u32(1);
+                                    if (audio != null) {
+                                        stsd.box("mp4a", entry -> {
+                                            entry.zeros(6).u16(1).zeros(8);
+                                            entry.u16(audio.channels()).u16(16).u16(0).u16(0);
+                                            entry.u32((long) audio.sampleRate() << 16);
+                                            audio.writeConfiguration(entry);
+                                        });
+                                    } else {
+                                        stsd.box(codec.sampleEntryType(), entry -> {
+                                            entry.zeros(6).u16(1);      // reserved, data reference index
+                                            entry.zeros(16);            // predefined and reserved
+                                            entry.u16(width).u16(height);
+                                            entry.u32(0x00480000).u32(0x00480000);  // 72 dpi
+                                            entry.u32(0);               // reserved
+                                            entry.u16(1);               // frame count
+                                            entry.zeros(32);            // compressor name
+                                            entry.u16(0x0018);          // depth
+                                            entry.u16(0xFFFF);          // predefined, -1
+                                            codec.writeConfiguration(entry);
+                                        });
+                                    }
                                 });
+                                // Required, and empty: the samples they would describe
+                                // have not happened yet.
+                                stbl.fullBox("stts", 0, 0, stts -> stts.u32(0));
+                                stbl.fullBox("stsc", 0, 0, stsc -> stsc.u32(0));
+                                stbl.fullBox("stsz", 0, 0, stsz -> stsz.u32(0).u32(0));
+                                stbl.fullBox("stco", 0, 0, stco -> stco.u32(0));
                             });
-                            // Required, and empty: the samples they would describe
-                            // have not happened yet.
-                            stbl.fullBox("stts", 0, 0, stts -> stts.u32(0));
-                            stbl.fullBox("stsc", 0, 0, stsc -> stsc.u32(0));
-                            stbl.fullBox("stsz", 0, 0, stsz -> stsz.u32(0).u32(0));
-                            stbl.fullBox("stco", 0, 0, stco -> stco.u32(0));
                         });
                     });
                 });
-            });
-
+            }
             // Says the sample information arrives in fragments rather than here.
-            moov.box("mvex", mvex -> mvex.fullBox("trex", 0, 0, trex -> trex
-                    .u32(trackId)
-                    .u32(1)     // default sample description index
-                    .u32(0)     // default sample duration
-                    .u32(0)     // default sample size
-                    .u32(0)));  // default sample flags
+            moov.box("mvex", mvex -> {
+                for (Track track : tracks) {
+                    mvex.fullBox("trex", 0, 0, trex -> trex
+                            .u32(track.id())
+                            .u32(1)     // default sample description index
+                            .u32(0)     // default sample duration
+                            .u32(0)     // default sample size
+                            .u32(0));  // default sample flags
+                }
+            });
         });
         return out.toByteArray();
     }

@@ -207,8 +207,37 @@ It finds the H.264 track from the PMT, so it can be pointed at a real capture.
 Open the result in a browser: everything between the transport stream and that
 file is this library, and ffmpeg is only ever used to make the input.
 
-Audio is next: an AAC track alongside, which for MoQ is a separate track rather
-than something to multiplex.
+AAC-LC audio is supported alongside H.264. The CLI selects the first ADTS AAC
+track **in the same program** as the video and writes both tracks into one file.
+The library also exposes `AacFragmenter` and `InitSegment.forAudio` for a separate
+audio track; neither knows about MoQ.
+
+ADTS headers are stripped and each raw AAC frame becomes an MP4 sample. A PES
+can carry several frames, or only part of one. The audio track uses its sample
+rate as its timescale: every AAC-LC frame lasts exactly 1024 ticks, including a
+single-frame fragment. PES timestamps anchor that clock to the video timeline;
+missing timestamps continue it, normal 33-bit PTS wrap is unwrapped, and gaps
+between PES payloads retain their timing. Call `discontinuity()` after upstream
+loss to discard a partial frame and require a fresh PTS at an ADTS frame boundary.
+A timestamp reset requires a new timeline. The CLI emits audio fragments as PES
+payloads complete; audio does not wait for a video keyframe.
+
+Verified against ffmpeg on 44.1 kHz mono and 48 kHz stereo fixtures: decoded PCM
+is byte-identical to the source, every video PTS is unchanged, and every audio PTS
+is within one audio tick of the source. Run `:grind-fmp4:interopTest` to repeat
+these checks. A five-second synthetic H.264 + stereo AAC clip also reached the
+end in the browser with 125 decoded video frames, decoded audio bytes and no
+media error (playback was muted). Real EMX input remains to be validated.
+
+Current audio scope: AAC-LC in ADTS, indexed rates from 7350 to 48000 Hz,
+channel configurations 1–7 (the last means eight channels). LATM, PCE channel
+layouts, multiple raw data blocks per ADTS frame, and other AAC profiles are not
+supported. Implicit SBR/PS signalling is not detected. Protected ADTS headers are
+stripped without checking their CRC. Malformed headers, incomplete final frames,
+and configuration changes fail explicitly rather than produce a misleading file.
+The CLI reports and omits unsupported audio stream types; unsupported ADTS
+configurations stop conversion. It remains a file diagnostic, buffering the
+input and output, not a live relay.
 
 Be aware that this is packager territory — the container transform at the centre
 of what Shaka Packager and Bento4 do. The parts that make a packager large are
@@ -345,7 +374,7 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
 | **SCTE-35** | splice information, read only, in `grind-scte` | **in progress**, see below |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
-| **fMP4** | repackaging access units as fragmented MP4, in `grind-fmp4` | **video done**, audio next |
+| **fMP4** | repackaging access units as fragmented MP4, in `grind-fmp4` | **H.264 + AAC-LC implemented**, live integration remains |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
 
 Phases 4 and 5 are genuinely optional and exist so the boundary is written down.
