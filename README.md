@@ -257,7 +257,7 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 |---|---|:---:|
 | **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; PES headers (PTS/DTS); continuity tracking; per-PID stats | **done** |
 | **1b — Clocks and timing** | Per-program clocks; PCR and PTS repetition; PAT/PMT repetition; PTS-to-PCR skew | **done** (PCR accuracy parked) |
-| **2 — Elementary streams** | PES payload reassembly into access units; frame boundaries from PES starts | **parked**, see below |
+| **2 — Elementary streams** | PES payload reassembly into access units | **done** |
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
 | **SCTE-35** | splice information, read only, in `grind-scte` | **in progress**, see below |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
@@ -450,22 +450,25 @@ is a complete CBR file and byte offsets mean something. If something is wanted i
 this space sooner, the honest version is PCR jitter measured against the stream's
 own average rate, named so it does not claim TR 101 290 conformance.
 
-**Parked — access-unit reassembly.** Collecting PES payload across TS packets
-into whole frames. Parked rather than dropped, and the reasons are worth stating
-because they are the argument for un-parking it later:
+**Un-parked — access-unit reassembly.** `AccessUnitAssembler` collects PES
+payload across transport packets into whole coded pictures. It was parked until
+something needed it, on the grounds that its design questions could not be
+answered in the abstract. Browser distribution over MoQ became that consumer, and
+answered all three:
 
-- On its own it produces complete byte arrays that nothing reads. Its payoff is
-  codec-level inspection — resolution, profile, real frame types from slice
-  headers — and that is phase 3 work.
-- It needs decisions that cannot be made well in the abstract: a memory cap for a
-  corrupt stream whose PES never terminates, the lifetime of assembled buffers,
-  and what a GOP straddling a discontinuity should produce.
-- It is the first step across the v1 line above. Inspecting a stream does not
-  require reassembling it; decoding does.
+| question | the answer a fragmenting consumer forces |
+|---|---|
+| how much to buffer | one unit, capped at 8 MiB |
+| how long to hold it | until it is returned, and no longer |
+| what a gap produces | nothing — a damaged unit is counted and dropped |
 
-The trigger for un-parking it is a consumer that actually needs access units,
-because that consumer can answer the questions above. Guessing at them now would
-mean building the wrong thing carefully.
+Half a picture is worse than none: a decoder handed one produces artefacts rather
+than an error, so the damage would surface as something a viewer sees instead of
+something a log records.
+
+Reassembly is still not decoding. No bitstream is parsed and nothing is
+interpreted — the elementary stream bytes come out as the encoder produced them,
+which is what keeps the v1 line intact.
 
 **Parked — a fixture with genuinely independent program clocks.** Both programs
 in `multiprogram.ts` carry the same clock, because ffmpeg built them from one
@@ -487,9 +490,16 @@ fixtures, each there because the others cannot show something:
 | `bframes.ts` | reordered frames, so a real DTS that differs from the PTS |
 | `multiprogram.ts` | two programs, two PMTs on separate PIDs, four tracks |
 | `splice.ts` | SCTE-35 ad markers, both signalling styles |
+| `sample.h264`, `bframes.h264` | the same elementary streams as ffmpeg extracts them |
 
 Expectations are cross-checked against what `ffprobe` and TSDuck independently
 report about the same files.
+
+Access-unit reassembly gets the strongest check in the project, because a total
+one is available: `ffmpeg -c:v copy -f h264` extracts the same elementary stream,
+and what the assembler produces is compared against it **byte for byte**. Both
+fixtures match exactly. That is not a sample of the behaviour, it is all of it —
+and ffmpeg has no reason to share this implementation's mistakes.
 
 The first three are one `ffmpeg` command each. `splice.ts` is not, because
 ffmpeg cannot produce SCTE-35 at all — it knows the stream type well enough to
