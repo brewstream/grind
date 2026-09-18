@@ -31,6 +31,7 @@ Two artifacts:
 | `grind-core` | parser and analyzer | none |
 | `grind-netty` | pipeline handlers | Netty |
 | `grind-scte` | SCTE-35 splice information | `grind-core` |
+| `grind-fmp4` | repackaging as fragmented MP4 (in progress) | `grind-core` |
 
 **Not yet published.** Consume as a Gradle composite build until a release is cut:
 
@@ -175,6 +176,39 @@ The unimplemented ones are all *timing* checks, and they share a reason: they
 need a rate model rather than a parser. Phase 2's PTS-to-PCR skew work is where
 that starts.
 
+### fMP4 output, and the limits of checking it
+
+`grind-fmp4` repackages access units as fragmented MP4, which is what a browser
+can play. It is **not transcoding**: the coded pictures pass through untouched
+and only the container changes, so the cost is negligible and nothing is
+re-encoded.
+
+Be aware that this is packager territory — the container transform at the centre
+of what Shaka Packager and Bento4 do. The parts that make a packager large are
+absent, because MoQ has no manifests, no segment addressing, no DRM and no ABR
+variants. What remains is the transform itself.
+
+**The verification is weaker here than anywhere else in this project, and that is
+worth knowing.** For parsing there was a total oracle: ffmpeg extracts the same
+elementary stream and the bytes match exactly. No such thing exists for MP4
+output, because valid muxers legitimately differ in box order and in whether they
+repeat parameter sets in-band — a round trip through ffmpeg's own fragmenter and
+back is not byte-identical either, which was measured rather than assumed.
+
+So the checks are layered instead:
+
+| check | what it establishes |
+|---|---|
+| `mp4dump` (Bento4) on a reference ffmpeg muxed from the same fixture | the exact bytes a correct `avcC` carries |
+| `ffprobe` frame table on our output | frame count, every PTS and DTS, keyframe positions |
+| `mp4fragment`, `MP4Box -info` | structure, against an independent fragmenter |
+| a browser | the last word, and the least informative |
+
+Parameter set extraction is already checked against the first of those: the
+sequence and picture parameter sets this module finds are byte-identical to the
+ones `mp4dump` reports in the reference muxer's `avcC`, as are the profile,
+compatibility and level bytes.
+
 ### Conformance is not damage
 
 `PCR_repetition_error` is counted but does **not** mark an errored second and
@@ -261,6 +295,7 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
 | **SCTE-35** | splice information, read only, in `grind-scte` | **in progress**, see below |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
+| **fMP4** | repackaging access units as fragmented MP4, in `grind-fmp4` | **in progress** |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
 
 Phases 4 and 5 are genuinely optional and exist so the boundary is written down.

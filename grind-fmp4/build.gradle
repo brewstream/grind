@@ -1,0 +1,26 @@
+description = 'Repackaging MPEG-TS access units as fragmented MP4, without transcoding'
+
+dependencies {
+    // api, not implementation: AccessUnit appears in this module's public API, so
+    // a consumer that only got it transitively at runtime could not compile.
+    api project(':grind-core')
+}
+
+mavenPublishing {
+    coordinates(project.group.toString(), 'grind-fmp4', project.version.toString())
+    pom {
+        name = 'Grind fMP4'
+        description = project.description
+    }
+}
+
+base {
+    archivesName = 'grind-fmp4'
+}
+
+// Shares core's fixtures rather than duplicating binary into git.
+sourceSets {
+    test {
+        resources.srcDir project(':grind-core').file('src/test/resources')
+    }
+}
