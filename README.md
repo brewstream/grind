@@ -195,6 +195,18 @@ Fragments begin at keyframes, which is where a player may join and — not
 coincidentally — exactly the unit MoQ wants for a group. Both are answering the
 same question: where can somebody start?
 
+There is a tool for trying it, because the last word belongs to a browser rather
+than to anything that reports what it sees:
+
+```sh
+java -cp grind-fmp4/build/classes/java/main:grind-core/build/classes/java/main \
+     org.brewstream.grind.fmp4.cli.TsToMp4 input.ts output.mp4
+```
+
+It finds the H.264 track from the PMT, so it can be pointed at a real capture.
+Open the result in a browser: everything between the transport stream and that
+file is this library, and ffmpeg is only ever used to make the input.
+
 Audio is next: an AAC track alongside, which for MoQ is a separate track rather
 than something to multiplex.
 
