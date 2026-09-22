@@ -117,6 +117,29 @@ public final class TsAnalyzer {
     /** One section assembler per PSI PID: PID 0 from the start, PMT PIDs as the PAT names them. */
     private final Map<Integer, SectionAssembler> psiAssemblers = new LinkedHashMap<>();
 
+    /**
+     * One section assembler per DVB table PID — NIT, SDT and EIT.
+     *
+     * <p>Kept apart from {@link #psiAssemblers} rather than merged into it, and
+     * the reason is the CRC counters rather than tidiness. A section discarded
+     * on PID 0 leaves the stream's structure unknown and is damage; one
+     * discarded on the EIT PID costs a programme description. Sharing a map
+     * would mean sharing a counter, and the counter feeds
+     * {@link TsStreamStats#isHealthy()}.
+     */
+    private final Map<Integer, SectionAssembler> dvbAssemblers = new LinkedHashMap<>();
+
+    /**
+     * EIT present/following by service, and within a service by section number.
+     *
+     * <p>Sections rather than the latest table: EN 300 468 puts the present
+     * event in section 0 and the following one in section 1, so keeping only the
+     * most recent arrival would report next week's film as what is on now. The
+     * nested map is ordered by section number so merging is a concatenation.
+     */
+    private final Map<Integer, java.util.TreeMap<Integer, EventInformationTable>> eventsByService =
+            new LinkedHashMap<>();
+
     private ProgramMap programMap = ProgramMap.EMPTY;
 
     private long packets;
@@ -244,6 +267,7 @@ public final class TsAnalyzer {
         trackRandomAccess(packet, state);
         trackPcr(packet, state);
         trackTables(packet);
+        trackDvbTables(packet);
         trackPes(packet, state);
     }
 
@@ -350,14 +374,156 @@ public final class TsAnalyzer {
             }
             programMap = programMap.withProgram(pmt.programNumber(), pmt);
         } else {
-            return; // a table this library does not read yet - SDT, EIT, NIT
+            return; // not a table this PID's assembler is here for
         }
 
+        // Whole-record equality is the right test despite the map now carrying a
+        // DVB half as well, because this method only ever changes the PSI half:
+        // fromPat and withProgram both carry the services and the network
+        // through untouched. The two halves are therefore never in play at once,
+        // which is what keeps this notification and the service-information one
+        // from firing for each other's reasons.
         if (!programMap.equals(previous)) {
             rebindClocks();
             ProgramMap announced = programMap;
             fire(listener -> listener.onProgramsChanged(announced));
         }
+    }
+
+    /**
+     * Feeds the DVB table PIDs to their assemblers and applies what comes out.
+     *
+     * <p>Separate from {@link #trackTables} in three ways that all matter, and
+     * none of which is stylistic:
+     *
+     * <ul>
+     *   <li><b>A failed CRC here is not damage.</b> It is counted in
+     *       {@code dvbCrcErrors} and marks no errored second, because losing an
+     *       EIT costs a programme description rather than the stream. The EIT is
+     *       also the biggest table on a real multiplex and takes loss routinely,
+     *       so counting it as damage would report working broadcast streams as
+     *       broken for most of their duration — the same failure shape as
+     *       folding PCR repetition into health.</li>
+     *   <li><b>No repetition tracking.</b> The 500ms limit is a PAT and PMT
+     *       figure; DVB's own limits for these tables are different numbers from
+     *       a different standard (TS 101 211), and asserting one against the
+     *       other would manufacture breaches.</li>
+     *   <li><b>These PIDs are fixed, so they are assembled from the first
+     *       packet</b> rather than waiting for a table to name them the way a
+     *       PMT PID is.</li>
+     * </ul>
+     */
+    private void trackDvbTables(TsPacket packet) {
+        int pid = packet.pid();
+        if (pid != TsPacket.NIT_PID && pid != TsPacket.SDT_PID && pid != TsPacket.EIT_PID) {
+            return;
+        }
+
+        SectionAssembler assembler =
+                dvbAssemblers.computeIfAbsent(pid, key -> new SectionAssembler());
+        for (TableSection section : assembler.consume(packet)) {
+            if (section.current()) {
+                applyDvbSection(section);
+            }
+        }
+    }
+
+    /**
+     * Applies one DVB section.
+     *
+     * <p>Dispatch is on the table id, never on the PID. PID 0x11 carries the SDT
+     * for this transport stream and for others, and the Bouquet Association
+     * Table besides; PID 0x12 carries present/following and the whole schedule.
+     * Reading a PID as though it meant one table is how a bouquet's services end
+     * up listed as this multiplex's.
+     *
+     * <p>The "other" variants are recognised and dropped. They describe
+     * multiplexes this stream is not carrying, so applying them would have a
+     * dashboard listing services that are not here — and no fixture carries one,
+     * so surfacing them would be untested as well as wrong.
+     */
+    private void applyDvbSection(TableSection section) {
+        ProgramMap previous = programMap;
+
+        switch (section.tableId()) {
+            case TableSection.TABLE_ID_SDT_ACTUAL: {
+                ServiceDescriptionTable sdt = ServiceDescriptionTable.parse(section);
+                if (sdt == null) {
+                    return;
+                }
+                programMap = programMap.withServices(sdt.services());
+                break;
+            }
+            case TableSection.TABLE_ID_NIT_ACTUAL: {
+                NetworkInformationTable nit = NetworkInformationTable.parse(section);
+                if (nit == null) {
+                    return;
+                }
+                programMap = programMap.withNetwork(nit);
+                break;
+            }
+            case TableSection.TABLE_ID_EIT_PF_ACTUAL: {
+                EventInformationTable eit = EventInformationTable.parse(section);
+                if (eit == null) {
+                    return;
+                }
+                eventsByService
+                        .computeIfAbsent(eit.serviceId(), key -> new java.util.TreeMap<>())
+                        .put(section.sectionNumber(), eit);
+                int serviceId = eit.serviceId();
+                EventInformationTable merged = events(serviceId);
+                fire(listener -> listener.onEventsChanged(serviceId, merged));
+                return; // events are their own notification, not a map change
+            }
+            default:
+                return; // an "other" variant, EIT schedule, or the BAT
+        }
+
+        // The mirror of the note in applySection: this method only ever changes
+        // the DVB half, so equality over the whole record answers the question
+        // "did the service information change" exactly.
+        if (!programMap.equals(previous)) {
+            ProgramMap announced = programMap;
+            fire(listener -> listener.onServiceInformationChanged(announced));
+        }
+    }
+
+    /**
+     * What is on now and next for one service, or {@code null} when no EIT has
+     * announced it.
+     *
+     * <p>Assembled from every present/following section the service has sent, in
+     * section order, so {@link EventInformationTable#present()} means the
+     * present event whether the stream split the two across sections as the
+     * standard describes or carried both in one as TSDuck writes them.
+     *
+     * @param serviceId the service, which is also its program number
+     */
+    public EventInformationTable events(int serviceId) {
+        java.util.TreeMap<Integer, EventInformationTable> sections =
+                eventsByService.get(serviceId);
+        if (sections == null || sections.isEmpty()) {
+            return null;
+        }
+        EventInformationTable first = sections.firstEntry().getValue();
+        if (sections.size() == 1) {
+            return first;
+        }
+        List<Event> merged = new ArrayList<>();
+        for (EventInformationTable section : sections.values()) {
+            merged.addAll(section.events());
+        }
+        return new EventInformationTable(first.serviceId(), first.transportStreamId(),
+                first.originalNetworkId(), List.copyOf(merged));
+    }
+
+    /** Every service an EIT has announced events for, by service id. */
+    public Map<Integer, EventInformationTable> events() {
+        Map<Integer, EventInformationTable> all = new LinkedHashMap<>();
+        for (Integer serviceId : eventsByService.keySet()) {
+            all.put(serviceId, events(serviceId));
+        }
+        return Map.copyOf(all);
     }
 
     /**
@@ -891,9 +1057,13 @@ public final class TsAnalyzer {
         for (SectionAssembler assembler : psiAssemblers.values()) {
             crcFailures += assembler.crcFailures();
         }
+        long dvbCrcFailures = 0;
+        for (SectionAssembler assembler : dvbAssemblers.values()) {
+            dvbCrcFailures += assembler.crcFailures();
+        }
         long observedSeconds = referenceClock == null ? 0 : referenceClock.observedSeconds();
         return new TsStreamStats(packets, bytes, nullPackets, continuityErrors, packetsLost,
-                transportErrors, duplicates, pesPackets, syncLosses, crcFailures,
+                transportErrors, duplicates, pesPackets, syncLosses, crcFailures, dvbCrcFailures,
                 pcrDiscontinuities, pcrRepetitionErrors, ptsErrors, patSpacing.breaches,
                 pmtRepetitionErrors(), widestTableInterval(), lateTimestamps, erroredSeconds,
                 observedSeconds,

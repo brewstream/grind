@@ -19,6 +19,17 @@ subprojects {
         }
     }
 
+    // Stated rather than inherited from the platform default. The sources carry
+    // non-ASCII in their javadoc already, and since DvbText they carry a
+    // character table as well - a build that read them as Latin-1 would compile
+    // a different table and say nothing about it.
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+    }
+    tasks.withType(Javadoc).configureEach {
+        options.encoding = 'UTF-8'
+    }
+
     repositories {
         mavenCentral()
     }

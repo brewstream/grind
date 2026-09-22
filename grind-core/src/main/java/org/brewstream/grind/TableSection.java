@@ -27,7 +27,8 @@ import java.util.Arrays;
  * all of it has arrived and the CRC agrees — which is what
  * {@link SectionAssembler} produces.
  *
- * @param tableId         what kind of table this is: 0x00 PAT, 0x02 PMT, 0x42 SDT
+ * @param tableId         what kind of table this is: 0x00 PAT, 0x02 PMT, 0x40 NIT,
+ *                        0x42 SDT, 0x4E EIT present/following
  * @param tableIdExtension for a PAT the transport stream id, for a PMT the program number
  * @param version         increments when the table's contents change, wrapping at 32
  * @param current         whether this table is in force now, or describes a future state
@@ -63,6 +64,47 @@ public record TableSection(
 
     /** Program Map Table — on whichever PID the PAT names. */
     public static final int TABLE_ID_PMT = 0x02;
+
+    /** Network Information Table for this network — PID 0x10. */
+    public static final int TABLE_ID_NIT_ACTUAL = 0x40;
+
+    /**
+     * Network Information Table for a <em>different</em> network.
+     *
+     * <p>Recognised so it is not mistaken for an unknown table, and deliberately
+     * not applied: it describes multiplexes this stream is not carrying, and
+     * folding it into what the stream contains would claim services that are not
+     * here. No fixture carries one either, so reading it would be untested as
+     * well as wrong.
+     */
+    public static final int TABLE_ID_NIT_OTHER = 0x41;
+
+    /** Service Description Table for this transport stream — PID 0x11. */
+    public static final int TABLE_ID_SDT_ACTUAL = 0x42;
+
+    /**
+     * Service Description Table for a different transport stream. Recognised and
+     * not applied, for the same reason as {@link #TABLE_ID_NIT_OTHER}.
+     */
+    public static final int TABLE_ID_SDT_OTHER = 0x46;
+
+    /** Event Information Table, present/following, for this transport stream — PID 0x12. */
+    public static final int TABLE_ID_EIT_PF_ACTUAL = 0x4E;
+
+    /**
+     * Event Information Table, present/following, for a different transport
+     * stream. Recognised and not applied.
+     */
+    public static final int TABLE_ID_EIT_PF_OTHER = 0x4F;
+
+    /**
+     * The first EIT schedule table id. Schedule tables run from here to 0x6F and
+     * are deliberately not read; see {@link EventInformationTable}.
+     */
+    public static final int TABLE_ID_EIT_SCHEDULE_FIRST = 0x50;
+
+    /** The last EIT schedule table id. */
+    public static final int TABLE_ID_EIT_SCHEDULE_LAST = 0x6F;
 
     /** The fixed part of a long section: table id, length, extension, version, section numbers. */
     public static final int LONG_HEADER_LENGTH = 8;

@@ -23,16 +23,20 @@ import java.util.List;
  * The PMT: the tracks of one program, and which of them carries its clock
  * (ISO/IEC 13818-1 §2.4.4.8).
  *
- * <p>Descriptors are skipped rather than parsed — correctly skipped, since their
- * declared lengths are what locate the next stream entry, but not surfaced.
- * Reading them is phase 3; getting the track list right is what a health view
- * needs.
+ * <p>Both descriptor loops are read: the program-level one, which is where a
+ * registration identifier such as {@code CUEI} declares what a private stream
+ * type means, and each track's own, which is where its language is.
  *
- * @param programNumber which program this describes
- * @param pcrPid        the PID carrying this program's clock, or 0x1FFF when it has none
- * @param streams       the program's tracks, in the order the table lists them
+ * @param programNumber      which program this describes
+ * @param pcrPid             the PID carrying this program's clock, or 0x1FFF when it has none
+ * @param programDescriptors the descriptor loop describing the program as a whole
+ * @param streams            the program's tracks, in the order the table lists them
  */
-public record ProgramMapTable(int programNumber, int pcrPid, List<ElementaryStream> streams) {
+public record ProgramMapTable(
+        int programNumber,
+        int pcrPid,
+        List<Descriptor> programDescriptors,
+        List<ElementaryStream> streams) {
 
     /**
      * Parses a PMT section body.
@@ -53,20 +57,72 @@ public record ProgramMapTable(int programNumber, int pcrPid, List<ElementaryStre
         if (cursor > body.length) {
             return null; // program descriptors claim more than the section holds
         }
+        List<Descriptor> programDescriptors = Descriptor.parseLoop(body, 4, programInfoLength);
 
         List<ElementaryStream> streams = new ArrayList<>();
         while (cursor + 5 <= body.length) {
             int rawType = body[cursor] & 0xFF;
             int pid = ((body[cursor + 1] & 0x1F) << 8) | (body[cursor + 2] & 0xFF);
             int esInfoLength = ((body[cursor + 3] & 0x0F) << 8) | (body[cursor + 4] & 0xFF);
-            cursor += 5 + esInfoLength;
+            int esInfoStart = cursor + 5;
+            cursor = esInfoStart + esInfoLength;
             if (cursor > body.length) {
                 return null; // an ES descriptor length ran past the section
             }
-            streams.add(new ElementaryStream(pid, StreamType.fromCode(rawType), rawType));
+            streams.add(new ElementaryStream(pid, StreamType.fromCode(rawType), rawType,
+                    Descriptor.parseLoop(body, esInfoStart, esInfoLength)));
         }
 
-        return new ProgramMapTable(section.tableIdExtension(), pcrPid, List.copyOf(streams));
+        return new ProgramMapTable(section.tableIdExtension(), pcrPid,
+                programDescriptors, List.copyOf(streams));
+    }
+
+    /**
+     * The program's {@code registration_descriptor} identifier, or {@code null}
+     * when it carries none.
+     *
+     * <p>Four characters naming the body that defines what the program's private
+     * stream types mean — {@code CUEI} for SCTE 35, which is what tells a reader
+     * that stream type 0x86 is splice information rather than whatever else a
+     * private type might be. Returned as text because every identifier in
+     * practice is four printable characters, and as the raw bytes it would be
+     * unreadable in exactly the place it is meant to be recognised.
+     */
+    public String registrationIdentifier() {
+        Descriptor registration =
+                Descriptor.find(programDescriptors, Descriptor.TAG_REGISTRATION);
+        if (registration == null) {
+            return null;
+        }
+        byte[] payload = registration.payload();
+        if (payload.length < 4) {
+            return null;
+        }
+        return new String(payload, 0, 4, java.nio.charset.StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * The first track carrying this language, or {@code null} when none does.
+     *
+     * <p>What a repackager should use to choose an audio track, instead of
+     * taking the first one the table lists and being right only on the streams
+     * it was tested against.
+     *
+     * @param language an ISO 639-2 three-letter code, matched case-insensitively
+     *                 because nothing enforces the case a muxer writes
+     */
+    public ElementaryStream streamWithLanguage(String language) {
+        if (language == null) {
+            return null;
+        }
+        for (ElementaryStream stream : streams) {
+            for (String candidate : stream.languages()) {
+                if (candidate.equalsIgnoreCase(language)) {
+                    return stream;
+                }
+            }
+        }
+        return null;
     }
 
     /** The track carrying video, or {@code null} — what a dashboard leads with. */

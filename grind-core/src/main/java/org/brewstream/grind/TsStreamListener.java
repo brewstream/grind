@@ -140,6 +140,41 @@ public interface TsStreamListener {
     default void onProgramsChanged(ProgramMap programs) {
     }
 
+    /**
+     * The DVB tables said something new: a service was renamed, added or
+     * removed, or the NIT changed.
+     *
+     * <p>Separate from {@link #onProgramsChanged} because the two are announced
+     * by different tables on different schedules and mean different things. A
+     * service being renamed is not the stream's table of contents changing, and
+     * a listener watching for the source to be reconfigured should not be woken
+     * by a muxer relabelling a channel.
+     *
+     * <p>Fires on the first SDT or NIT too, which is how a consumer learns the
+     * stream has names at all. On a stream carrying neither — which most
+     * contribution feeds do not — it never fires, and that is not a fault.
+     *
+     * @param programs the map, with its service and network halves updated
+     */
+    default void onServiceInformationChanged(ProgramMap programs) {
+    }
+
+    /**
+     * An EIT announced what is on one service now and next.
+     *
+     * <p>Fires on every present/following section, which on a broadcast stream
+     * is a couple of times a second for each service — the table is repeated
+     * constantly, not sent on change. Treat this as a sample rather than as an
+     * event: comparing against what was last seen is the consumer's job, because
+     * doing it here would mean holding a copy of every service's programme
+     * listings to compare against.
+     *
+     * @param serviceId the service, which is also its program number
+     * @param events    the merged present/following view for it
+     */
+    default void onEventsChanged(int serviceId, EventInformationTable events) {
+    }
+
     /** A PID carried its first packet — how a consumer learns what is in the stream. */
     default void onPidDiscovered(int pid) {
     }
