@@ -114,7 +114,8 @@ class DvbTablesTest {
         ProgramMap programs = analyzeDvb().programs();
 
         assertThat(programs.describe(VIDEO_PID)).isEqualTo("Brewstream One H.264 / AVC");
-        assertThat(programs.describe(AUDIO_ENGLISH_PID)).isEqualTo("Brewstream One AAC (ADTS)");
+        assertThat(programs.describe(AUDIO_ENGLISH_PID))
+                .isEqualTo("Brewstream One AAC (ADTS) [eng]");
         assertThat(programs.describe(SECOND_PROGRAM_VIDEO_PID))
                 .isEqualTo("Brewstream Café H.264 / AVC");
         assertThat(programs.describe(0x1001)).isEqualTo("PMT for Brewstream Café");
@@ -299,6 +300,27 @@ class DvbTablesTest {
         assertThat(program.streams().get(0).language())
                 .as("the video track carries no language descriptor")
                 .isNull();
+    }
+
+    /**
+     * The reason a language belongs in the label at all.
+     *
+     * <p>Both audio tracks are AAC in the same service, so described by service
+     * and codec alone they are the same string, and a dashboard listing one row
+     * per PID prints it twice with nothing to choose between them. That is what
+     * this fixture reproduces and what the bracketed code fixes.
+     */
+    @Test
+    void twoAudioTracksInOneServiceAreToldApart() throws IOException {
+        ProgramMap programs = analyzeDvb().programs();
+
+        assertThat(programs.describe(AUDIO_ENGLISH_PID))
+                .isEqualTo("Brewstream One AAC (ADTS) [eng]");
+        assertThat(programs.describe(AUDIO_FRENCH_PID))
+                .isEqualTo("Brewstream One AAC (ADTS) [fra]");
+        assertThat(programs.describe(VIDEO_PID))
+                .as("a track the PMT gives no language keeps the description it had")
+                .isEqualTo("Brewstream One H.264 / AVC");
     }
 
     /**

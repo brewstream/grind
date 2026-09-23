@@ -72,6 +72,19 @@ public record ProgramMap(
      * AVC"} — because a name and a number want different framing, and
      * {@code "program Brewstream One"} reads like a mistake.
      *
+     * <p>A track whose PMT announces a language carries it in brackets:
+     * {@code "Brewstream One AAC (ADTS) [eng]"}. Without it a multilingual
+     * service's audio tracks describe identically and a dashboard cannot tell
+     * them apart — which is the whole of what an ISO 639 descriptor is for.
+     * Brackets rather than parentheses because a codec label may already end in
+     * them, and {@code "AAC (ADTS) (eng)"} reads as one nested thing rather than
+     * two separate facts. The code is not translated to a language name: the
+     * three letters are what the stream actually said, and every other figure
+     * here reports the wire rather than an interpretation of it.
+     *
+     * <p>The first code where a track announces several — the rare case, and
+     * {@link ElementaryStream#languages()} is the accessor that does not guess.
+     *
      * @return a description such as {@code "Brewstream One H.264 / AVC"}, or a
      *         structural label for PSI PIDs, or {@code null} when the PID is not
      *         one this map accounts for
@@ -100,11 +113,17 @@ public record ProgramMap(
         for (Map.Entry<Integer, ProgramMapTable> entry : programs.entrySet()) {
             for (ElementaryStream stream : entry.getValue().streams()) {
                 if (stream.pid() == pid) {
-                    return describeProgram(entry.getKey()) + " " + stream.label();
+                    return describeProgram(entry.getKey()) + " " + describeStream(stream);
                 }
             }
         }
         return null;
+    }
+
+    /** A track's own part of the description: what it carries, and in what language. */
+    private static String describeStream(ElementaryStream stream) {
+        String language = stream.language();
+        return language == null ? stream.label() : stream.label() + " [" + language + "]";
     }
 
     /**

@@ -88,9 +88,14 @@ difference between a dashboard and a hex dump:
 ProgramMap programs = analyzer.programs();
 
 programs.describe(0x100);        // "Brewstream One H.264 / AVC"
+programs.describe(0x101);        // "Brewstream One AAC (ADTS) [eng]"
 programs.programs().get(1).pcrPid();
 programs.allStreams();           // every track across every program
 ```
+
+A track whose PMT announces a language carries it in brackets. Without that, the
+two audio tracks of a bilingual service describe identically and a dashboard
+listing one row per PID prints the same words twice.
 
 The name comes from the SDT, and the join that produces it is the one identity
 DVB guarantees: **an SDT `service_id` is the PAT's `program_number`**
