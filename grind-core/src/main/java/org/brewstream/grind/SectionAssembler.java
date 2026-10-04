@@ -53,8 +53,11 @@ public final class SectionAssembler {
     /** The byte multiplexers pad with, and a table id that therefore cannot be real. */
     private static final int STUFFING = 0xFF;
 
+    /** Table id and the two bytes holding the length: the least that can be read. */
+    private static final int HEADER_PREFIX_LENGTH = 3;
+
     /** Enough for any single section: the length field is 12 bits, plus the 3-byte prefix. */
-    private static final int MAX_SECTION_LENGTH = 4096 + 3;
+    private static final int MAX_SECTION_LENGTH = 4096 + HEADER_PREFIX_LENGTH;
 
     private byte[] pending = new byte[0];
     private int pendingLength;
@@ -85,11 +88,29 @@ public final class SectionAssembler {
             int pointer = payload[0] & 0xFF;
             cursor = 1;
             if (pointer > 0) {
-                // These bytes finish the section already in progress. If none is
-                // in progress they are the tail of one whose start we missed -
-                // joining a stream mid-table - and are discarded by append().
                 int available = Math.min(pointer, payload.length - cursor);
-                append(payload, cursor, available, completed);
+                if (inProgress()) {
+                    // These bytes finish the section already in progress.
+                    append(payload, cursor, available, completed);
+                } else {
+                    // Nothing is in progress, so these are the tail of a section
+                    // whose start we never saw - what joining a live PID looks
+                    // like. They are skipped, not parsed.
+                    //
+                    // They used to be handed to append(), which does not discard
+                    // them: with no section open it reads the first of them as a
+                    // table id and the next two as a length, and fabricates a
+                    // table out of the middle of the previous one. A long
+                    // section's CRC then rejects it - but the rejection is
+                    // counted, so merely joining a stream could report a CRC
+                    // error and clear isHealthy(). A short section carries no
+                    // CRC at all, and SCTE 35 splice sections are short, so
+                    // there the invented section was emitted as real.
+                    //
+                    // Every fixture that predates dvb.ts hides this, because
+                    // their tables are small enough that each packet starts a
+                    // section and the pointer is always zero.
+                }
                 cursor += available;
             } else if (expectedLength > 0) {
                 // A new section starts immediately while one is unfinished: the
@@ -97,9 +118,14 @@ public final class SectionAssembler {
                 // its bytes contaminate the new table.
                 reset();
             }
-        } else if (expectedLength < 0) {
+        } else if (!inProgress()) {
             // Continuation bytes with nothing in progress: we joined mid-section
             // and cannot know where this one began.
+            //
+            // inProgress() rather than expectedLength, for the reason given on
+            // it: a section that began in the last byte or two of the previous
+            // packet has no length yet, and testing the length alone would
+            // discard the continuation of a section that was genuinely open.
             return List.of();
         }
 
@@ -136,18 +162,31 @@ public final class SectionAssembler {
             return 0;
         }
 
+        int consumed = 0;
+
         if (expectedLength < 0) {
-            // Starting a section. The length lives in the low 12 bits of bytes
-            // 1-2 and counts everything after itself, so the total is 3 more.
-            if (length < 3) {
-                // Split across the packet boundary before the length is even
-                // readable. Buffer what there is and decide next time.
-                grow(3);
-                System.arraycopy(payload, offset, pending, pendingLength, length);
-                pendingLength += length;
-                return length;
+            // Starting a section, or resuming one whose first three bytes were
+            // split across a packet boundary. The length lives in the low 12
+            // bits of bytes 1-2 and counts everything after itself, so the total
+            // is 3 more - which means it cannot be read until three bytes are in
+            // hand.
+            //
+            // They are buffered first and the length read back out of the
+            // buffer, never from the incoming packet. Reading it from the
+            // incoming bytes is right only when the section starts there: on a
+            // resumed header those bytes are the section's fourth and fifth, and
+            // the length that comes out is a number from the middle of a table.
+            grow(HEADER_PREFIX_LENGTH);
+            int wanted = Math.min(HEADER_PREFIX_LENGTH - pendingLength, length);
+            System.arraycopy(payload, offset, pending, pendingLength, wanted);
+            pendingLength += wanted;
+            consumed += wanted;
+            if (pendingLength < HEADER_PREFIX_LENGTH) {
+                return consumed; // still not enough to know how long this is
             }
-            expectedLength = 3 + (((payload[offset + 1] & 0x0F) << 8) | (payload[offset + 2] & 0xFF));
+
+            expectedLength =
+                    HEADER_PREFIX_LENGTH + (((pending[1] & 0x0F) << 8) | (pending[2] & 0xFF));
             if (expectedLength > MAX_SECTION_LENGTH) {
                 reset();
                 return length;
@@ -156,9 +195,10 @@ public final class SectionAssembler {
         }
 
         int needed = expectedLength - pendingLength;
-        int taken = Math.min(needed, length);
-        System.arraycopy(payload, offset, pending, pendingLength, taken);
+        int taken = Math.min(needed, length - consumed);
+        System.arraycopy(payload, offset + consumed, pending, pendingLength, taken);
         pendingLength += taken;
+        consumed += taken;
 
         if (pendingLength == expectedLength) {
             TableSection section = finish();
@@ -167,7 +207,7 @@ public final class SectionAssembler {
             }
             reset();
         }
-        return taken;
+        return consumed;
     }
 
     /** Validates and parses a fully buffered section. */
@@ -225,6 +265,19 @@ public final class SectionAssembler {
     private void reset() {
         pendingLength = 0;
         expectedLength = -1;
+    }
+
+    /**
+     * Whether a section is part-assembled.
+     *
+     * <p>Not simply {@code expectedLength > 0}. A section split across a packet
+     * boundary before its length field is even readable leaves one or two bytes
+     * buffered with the length still unknown, so {@code expectedLength} is -1
+     * while a section is very much in progress. Reading only the length would
+     * throw those bytes away and take the tail of the section as a new one.
+     */
+    private boolean inProgress() {
+        return expectedLength > 0 || pendingLength > 0;
     }
 
     /** Sections discarded because their checksum did not match — a sign of loss on this PID. */

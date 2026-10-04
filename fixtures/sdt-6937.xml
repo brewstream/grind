@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The SDT compiled into sdt-6937.bin by make-sdt-6937.sh.
+
+  The names are chosen for the bytes TSDuck picks for them, not for their
+  meaning. Service 1's take a 0x0B selector and come out as ISO 8859-15;
+  service 2's take no selector and come out as ISO/IEC 6937, the default table,
+  and every character in them lands in the upper half where 6937 and Latin-1
+  disagree. "Œuvre ½ æon" read as Latin-1 is "êuvre ½ ñon" - which is the kind
+  of wrong that looks like a font problem rather than a parser bug.
+-->
+<tsduck>
+  <SDT version="1" current="true" transport_stream_id="1" original_network_id="65281" actual="true">
+    <service service_id="1" EIT_schedule="false" EIT_present_following="false"
+             running_status="4" CA_mode="false">
+      <service_descriptor service_type="0x01"
+                          service_provider_name="Rundfunk Öst"
+                          service_name="Télé Un"/>
+    </service>
+    <service service_id="2" EIT_schedule="false" EIT_present_following="false"
+             running_status="4" CA_mode="false">
+      <service_descriptor service_type="0x01"
+                          service_provider_name="Ø"
+                          service_name="Œuvre ½ æon"/>
+    </service>
+  </SDT>
+</tsduck>

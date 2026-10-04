@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The EIT present/following carried by dvb.ts, compiled by TSDuck's tstabcomp
+  and injected by make-dvb-ts.sh. ffmpeg cannot produce an EIT at all, so this
+  is the one table in the fixture that TSDuck both writes and verifies.
+
+  service_id 1 is deliberately the PAT's program_number 1: EN 300 468 §5.2.3
+  makes them the same number, and that identity is what lets a programme name
+  reach a figure measured on a PID.
+
+  The times are absolute and fixed. They are not meant to be "now" - the fixture
+  is bytes, and a test asserting on 2026/09/22 20:00 keeps asserting on it.
+-->
+<tsduck>
+  <EIT type="pf" actual="true" version="1" current="true"
+       service_id="1" transport_stream_id="1" original_network_id="65281"
+       last_table_id="0x4E">
+    <event event_id="1" start_time="2026-09-22 20:00:00" duration="00:30:00"
+           running_status="4" CA_mode="false">
+      <short_event_descriptor language_code="eng">
+        <event_name>The Evening News</event_name>
+        <text>The day's headlines.</text>
+      </short_event_descriptor>
+    </event>
+    <event event_id="2" start_time="2026-09-22 20:30:00" duration="01:00:00"
+           running_status="1" CA_mode="false">
+      <short_event_descriptor language_code="eng">
+        <event_name>Film: The Long Afternoon</event_name>
+        <text>A comedy, repeated.</text>
+      </short_event_descriptor>
+    </event>
+  </EIT>
+</tsduck>

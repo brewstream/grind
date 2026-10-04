@@ -91,16 +91,47 @@ class ProgramTablesTest {
         assertThat(audio.streamType().kind()).isEqualTo(StreamType.Kind.AUDIO);
     }
 
-    /** The point of all this: a PID number becomes something a person can read. */
+    /**
+     * The point of all this: a PID number becomes something a person can read.
+     *
+     * <p>Named by its service rather than by its program number, because this
+     * file carries an SDT and ffmpeg put {@code "Service01"} in it. That is the
+     * join phase 3 exists for, and it works here on a fixture that predates the
+     * phase entirely — every stream ffmpeg muxes has carried an SDT all along.
+     */
     @Test
-    void aPidCanBeDescribedInTermsOfItsProgramAndCodec() throws IOException {
+    void aPidCanBeDescribedInTermsOfItsServiceAndCodec() throws IOException {
         ProgramMap programs = analyzeSample().programs();
 
-        assertThat(programs.describe(VIDEO_PID)).isEqualTo("program 1 H.264 / AVC");
-        assertThat(programs.describe(AUDIO_PID)).isEqualTo("program 1 AAC (ADTS)");
+        assertThat(programs.describe(VIDEO_PID)).isEqualTo("Service01 H.264 / AVC");
+        assertThat(programs.describe(AUDIO_PID)).isEqualTo("Service01 AAC (ADTS)");
         assertThat(programs.describe(TsPacket.PAT_PID)).isEqualTo("PAT");
-        assertThat(programs.describe(PMT_PID)).isEqualTo("PMT for program 1");
-        assertThat(programs.describe(0x0011)).as("SDT is not in the PAT, so not ours to name").isNull();
+        assertThat(programs.describe(PMT_PID)).isEqualTo("PMT for Service01");
+        assertThat(programs.describe(TsPacket.SDT_PID))
+                .as("the SDT is a table this library reads, so it is ours to name")
+                .isEqualTo("SDT");
+    }
+
+    /**
+     * A stream with no SDT is complete without one, and says so by number.
+     *
+     * <p>Built here rather than read from a fixture because every fixture in
+     * this project carries an SDT: ffmpeg writes one whether asked to or not, so
+     * there is no real file that exercises the fallback. The prohibition on
+     * hand-built fixtures is about stream bytes, where a parser and its fixture
+     * can agree on the same misreading — this is a pure function over a record
+     * with no bytes in it.
+     */
+    @Test
+    void aProgramWithNoServiceNameIsStillDescribedByNumber() throws IOException {
+        ProgramMap named = analyzeSample().programs();
+        ProgramMap unnamed = new ProgramMap(named.transportStreamId(), named.programs(),
+                named.pmtPids(), java.util.Map.of(), null);
+
+        assertThat(unnamed.serviceName(1)).isNull();
+        assertThat(unnamed.describeProgram(1)).isEqualTo("program 1");
+        assertThat(unnamed.describe(VIDEO_PID)).isEqualTo("program 1 H.264 / AVC");
+        assertThat(unnamed.describe(PMT_PID)).isEqualTo("PMT for program 1");
     }
 
     @Test

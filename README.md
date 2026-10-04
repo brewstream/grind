@@ -13,12 +13,14 @@ A companion module ships Netty handlers, so an SRT stream from
 [Roast](https://github.com/brewstream/roast) can be inspected by adding two
 handlers to a pipeline.
 
-**Status:** phases 1 and 1b complete. Packets, adaptation fields, PCR, PSI
-section assembly, PAT, PMT, PES headers, per-program clocks and the TR 101 290
-timing checks are implemented and tested against real streams — enough to say
-what a stream contains, how it is timed, whether it conforms, and whether it will
-play. SCTE-35 splice information is read in `grind-scte`. See the roadmap for
-what is next.
+**Status:** phases 1, 1b, 2 and 3 complete. Packets, adaptation fields, PCR, PSI
+section assembly, PAT, PMT, PES headers, access-unit reassembly, per-program
+clocks and the TR 101 290 timing checks are implemented and tested against real
+streams — enough to say what a stream contains, how it is timed, whether it
+conforms, and whether it will play. The DVB tables are read too, so a stream says
+what its services are *called* rather than only what number they are. SCTE-35
+splice information is read in `grind-scte`, and `grind-fmp4` repackages H.264 and
+AAC-LC into fragmented MP4. See the roadmap for what is next.
 
 ## Requirements
 
@@ -85,9 +87,39 @@ difference between a dashboard and a hex dump:
 ```java
 ProgramMap programs = analyzer.programs();
 
-programs.describe(0x100);        // "program 1 H.264 / AVC"
+programs.describe(0x100);        // "Brewstream One H.264 / AVC"
+programs.describe(0x101);        // "Brewstream One AAC (ADTS) [eng]"
 programs.programs().get(1).pcrPid();
 programs.allStreams();           // every track across every program
+```
+
+A track whose PMT announces a language carries it in brackets. Without that, the
+two audio tracks of a bilingual service describe identically and a dashboard
+listing one row per PID prints the same words twice.
+
+The name comes from the SDT, and the join that produces it is the one identity
+DVB guarantees: **an SDT `service_id` is the PAT's `program_number`**
+(EN 300 468 §5.2.3). Nothing else in a transport stream connects a name to a
+PID. A stream carrying no SDT — which most contribution feeds do not — falls
+back to `"program 1 H.264 / AVC"`, and `serviceName` returns null rather than a
+fabricated label, so a caller can tell "it is called this" from "nothing said".
+
+```java
+programs.serviceName(1);         // "Brewstream One", or null
+programs.services().get(1).runningStatus();   // RUNNING
+programs.network().networkName();             // from the NIT
+
+analyzer.events(1).present().name();          // "The Evening News", from the EIT
+```
+
+Descriptors are read on both PMT loops, which is what the rest of the stack was
+waiting for:
+
+```java
+ProgramMapTable program = programs.programs().get(1);
+
+program.registrationIdentifier();        // "CUEI" — this program carries SCTE-35
+program.streamWithLanguage("fra");       // the French audio, not the first audio
 ```
 
 Per-track timing comes from the PES headers:
@@ -121,6 +153,46 @@ bytes and nothing makes a network read land on a boundary. It also regains
 alignment when a stream does not start on a sync byte, requiring `0x47` to recur
 at the packet stride before trusting it — a lone `0x47` inside compressed video
 is an ordinary byte, and a naive scan locks onto noise.
+
+## Keyframes, for thumbnails without a decoder
+
+`KeyframeExtractor` keeps the latest **self-contained keyframe** of a stream's
+video: its parameter sets plus one complete IDR picture, in Annex B form, with the
+RFC 6381 codec string a decoder needs. Nothing is decoded here. A browser decodes
+the one frame with WebCodecs, which is how a relay shows a thumbnail without a
+video decoder in the JVM.
+
+```java
+KeyframeExtractor keyframes = new KeyframeExtractor();
+analyzer.addListener(new TsStreamListener() {
+    @Override
+    public void onProgramsChanged(ProgramMap programs) {
+        keyframes.programsChanged(programs);   // finds the H.264 or HEVC track
+    }
+});
+keyframes.enable();                            // off by default, and free while off
+// for each packet: analyzer.consume(packet); keyframes.consume(packet);
+
+keyframes.latest().ifPresent(k -> send(k.codec(), k.data()));   // "avc1.64000c", Annex B bytes
+```
+
+It works because MPEG-TS carries the parameter sets in-band and repeats them
+before every IDR, so parameter sets plus one IDR decode with no other context.
+That was measured on ffmpeg's H.264 and HEVC output before this was written, and
+`KeyframeInteropTest` checks that each extracted keyframe decodes alone in ffmpeg
+to exactly one frame, without errors.
+
+- **H.264 and HEVC.** IDR is NAL type 5 for H.264, and 19, 20 or 21 for HEVC (CRA
+  included: decoded alone, its leading pictures are simply skipped).
+- **Codec strings:** `avc1.PPCCLL`, and `hev1.A.B.C.D` per RFC 6381 §E.4 with the
+  compatibility flags bit-reversed. `hev1`, not `hvc1`, because the parameter
+  sets are in-band. Checked against ffmpeg's own codec strings for four fixtures,
+  covering Baseline constraint flags and Main 10's compatibility bit.
+- **A unit missing packets is dropped, never kept torn**, through
+  `AccessUnitAssembler`.
+- **Capped at 2 MB.** A larger IDR is skipped and counted.
+- **AV1 is out of scope.** Its sequence header is a different kind of thing and
+  can be added later.
 
 ## Reading a stream
 
@@ -171,6 +243,7 @@ decodable", Priority 2 is "decodable but wrong", Priority 3 is optional.
 | `PTS_error` — PTS at least every 700ms | 2 | `ptsErrors()`, `maxPtsIntervalMillis()` |
 | *(not a TR 101 290 check)* PTS-to-PCR skew | — | `ptsSkewMillis()`, `minPtsSkewMillis()`, `lateTimestamps()` |
 | `CAT_error`, scrambling checks | 2 | **not implemented** |
+| *(not a TR 101 290 check)* DVB table CRC failures | — | `dvbCrcErrors()`, counted apart and outside `isHealthy()` |
 
 The unimplemented ones are all *timing* checks, and they share a reason: they
 need a rate model rather than a parser. Phase 2's PTS-to-PCR skew work is where
@@ -207,8 +280,37 @@ It finds the H.264 track from the PMT, so it can be pointed at a real capture.
 Open the result in a browser: everything between the transport stream and that
 file is this library, and ffmpeg is only ever used to make the input.
 
-Audio is next: an AAC track alongside, which for MoQ is a separate track rather
-than something to multiplex.
+AAC-LC audio is supported alongside H.264. The CLI selects the first ADTS AAC
+track **in the same program** as the video and writes both tracks into one file.
+The library also exposes `AacFragmenter` and `InitSegment.forAudio` for a separate
+audio track; neither knows about MoQ.
+
+ADTS headers are stripped and each raw AAC frame becomes an MP4 sample. A PES
+can carry several frames, or only part of one. The audio track uses its sample
+rate as its timescale: every AAC-LC frame lasts exactly 1024 ticks, including a
+single-frame fragment. PES timestamps anchor that clock to the video timeline;
+missing timestamps continue it, normal 33-bit PTS wrap is unwrapped, and gaps
+between PES payloads retain their timing. Call `discontinuity()` after upstream
+loss to discard a partial frame and require a fresh PTS at an ADTS frame boundary.
+A timestamp reset requires a new timeline. The CLI emits audio fragments as PES
+payloads complete; audio does not wait for a video keyframe.
+
+Verified against ffmpeg on 44.1 kHz mono and 48 kHz stereo fixtures: decoded PCM
+is byte-identical to the source, every video PTS is unchanged, and every audio PTS
+is within one audio tick of the source. Run `:grind-fmp4:interopTest` to repeat
+these checks. A five-second synthetic H.264 + stereo AAC clip also reached the
+end in the browser with 125 decoded video frames, decoded audio bytes and no
+media error (playback was muted). Real EMX input remains to be validated.
+
+Current audio scope: AAC-LC in ADTS, indexed rates from 7350 to 48000 Hz,
+channel configurations 1–7 (the last means eight channels). LATM, PCE channel
+layouts, multiple raw data blocks per ADTS frame, and other AAC profiles are not
+supported. Implicit SBR/PS signalling is not detected. Protected ADTS headers are
+stripped without checking their CRC. Malformed headers, incomplete final frames,
+and configuration changes fail explicitly rather than produce a misleading file.
+The CLI reports and omits unsupported audio stream types; unsupported ADTS
+configurations stop conversion. It remains a file diagnostic, buffering the
+input and output, not a live relay.
 
 Be aware that this is packager territory — the container transform at the centre
 of what Shaka Packager and Bento4 do. The parts that make a packager large are
@@ -293,6 +395,20 @@ schedule. The contrast between the two is worth noting, though — no fixture he
 breaches the PTS limit, because video carries one about every 39ms and audio
 every 320ms. A PCR breach mostly means ffmpeg; a PTS breach means something.
 
+**A DVB table failing its CRC is counted apart from a PSI one**, in
+`dvbCrcErrors`, and stays out of `isHealthy()` and out of errored seconds. This
+one is excluded on a different principle from the others: a corrupt SDT or EIT
+section really was lost, so it is not a conformance measure — but what it cost
+was a name or a programme description, not the stream. Every PID stays findable
+and every frame stays decodable, which is not true when a PAT or PMT is lost, and
+that is why `crcErrors` keeps its place in `isHealthy()` and this does not.
+
+The practical reason matters as much as the principled one: on a real broadcast
+multiplex the EIT is the largest table by a wide margin, mostly schedule, and it
+takes loss as a matter of course. Folding it in would report working streams as
+broken for most of their duration — the same failure shape as folding in PCR
+repetition, arrived at from the opposite direction.
+
 So the health figures answer *was anything lost or corrupted*, and conformance
 checks are reported separately. Probes differ on this, which is exactly why it is
 written down rather than left to be inferred.
@@ -342,10 +458,10 @@ stream is healthy and why. Later phases widen toward full MPEG-TS.
 | **1 — Packets and tables** | TS packet layer, adaptation fields, PCR; PSI section assembly with CRC32; PAT and PMT; PES headers (PTS/DTS); continuity tracking; per-PID stats | **done** |
 | **1b — Clocks and timing** | Per-program clocks; PCR and PTS repetition; PAT/PMT repetition; PTS-to-PCR skew | **done** (PCR accuracy parked) |
 | **2 — Elementary streams** | PES payload reassembly into access units | **done** |
-| **3 — Extended metadata** | DVB tables (SDT, EIT, NIT); descriptor parsing | planned |
+| **3 — Extended metadata** | DVB tables (SDT, NIT, EIT present/following); descriptor parsing | **done** (EIT schedule parked) |
 | **SCTE-35** | splice information, read only, in `grind-scte` | **in progress**, see below |
 | **4 — Output** | TS muxing: writing a conforming stream, PCR insertion, stuffing — for repackaging without transcoding | planned |
-| **fMP4** | repackaging access units as fragmented MP4, in `grind-fmp4` | **video done**, audio next |
+| **fMP4** | repackaging access units as fragmented MP4, in `grind-fmp4` | **H.264 + AAC-LC implemented**, live integration remains |
 | **5 — Long tail** | Scrambled-stream structure (parse without decrypting), teletext and subtitle PIDs, multi-program selection and filtering | planned |
 
 Phases 4 and 5 are genuinely optional and exist so the boundary is written down.
@@ -354,11 +470,17 @@ decode.**
 
 ### What is being worked on, and what is parked
 
-Phase 2 as originally scoped bundled two things with very different value, so it
-has been split. What follows is the reasoning, kept here so the decision does not
-have to be rediscovered.
+Phases 1, 1b, 2 and 3 are done, and `grind-fmp4` implements H.264 + AAC-LC. The
+open threads are `grind-fmp4` **live integration** — it is implemented but has
+never been wired to a live pipeline — and phases 4 and 5, both of which are
+genuinely optional. Phase 3's own parked decisions are under
+"Phase 3: what was read, and what was deliberately not" above.
 
-**Being done now — the timing checks (1b).** Every TR 101 290 check Grind does
+What follows is the reasoning behind the earlier splits, kept here so the
+decisions do not have to be rediscovered. Phase 2 as originally scoped bundled
+two things with very different value, so it was split.
+
+**The timing checks (1b), done.** Every TR 101 290 check Grind does
 not implement is a *timing* check, and they are the largest remaining gap. They
 are also close to free: PTS, DTS and PCR are already tracked per PID, so most of
 the work is comparison rather than new parsing. In order:
@@ -392,6 +514,75 @@ the work is comparison rather than new parsing. In order:
   condemn every working stream. A track is compared against itself over time, and
   the figure that matters is the minimum: slack falling toward zero means the
   decoder's buffer is draining, and there is still time to act.
+
+### Phase 3: what was read, and what was deliberately not
+
+**SDT, NIT and EIT present/following are read; descriptors are read on both PMT
+loops.** The two things that pay for the phase are the service-name join
+described under "Knowing what the stream carries", and descriptors —
+`registrationIdentifier()` is how a reader knows a private stream type is SCTE-35
+rather than something else private, and `streamWithLanguage` is how a repackager
+picks the English audio instead of whichever audio track the muxer listed first.
+
+**EIT schedule (table ids 0x50–0x6F) is parked, and not for lack of time.** It
+is the full multi-day EPG, segmented across hundreds of sections, and on a
+broadcast multiplex it is the largest thing in the stream. Grind answers whether
+a stream is healthy and what it carries; a week of programme synopses answers
+neither, and holding it would cost memory proportional to the broadcaster's
+ambition rather than to the stream. Present/following is two events and answers
+"what is on now".
+
+**The "other" variants — NIT other, SDT other, EIT p/f other — are recognised
+and dropped.** They describe multiplexes this stream is not carrying, so applying
+them would have a dashboard listing services that are not here. No fixture
+carries one either, so reading them would be untested as well as wrong.
+
+**Strings are decoded per EN 300 468 Annex A, not as UTF-8.** A DVB string picks
+its own character table with an optional leading control code, and the default
+table is ISO/IEC 6937 rather than Latin-1 — they disagree above 0x7F and about
+the currency sign below it, and 6937 spends 0xC1–0xCF on combining diacritics
+that *precede* the letter they modify. Reading them as Latin-1 still produces
+letters, which is what makes it hard to notice.
+
+Measured rather than assumed: ffmpeg writes no selector for a pure-ASCII name and
+a 0x15 (UTF-8) selector as soon as one character is not, while TSDuck picks a
+0x0B (ISO 8859-15) selector for some names and the default table for others.
+Both tools' choices are in the fixtures. The East Asian tables (0x12–0x14) and
+the 0x1F encoding escape are **not** implemented and decode to replacement
+characters rather than to plausible nonsense — an unreadable name should read as
+unreadable rather than as the wrong name. Only the table positions the fixtures
+exercise are verified; the rest of the 6937 upper half is transcribed from the
+standard and untested.
+
+**No repetition checks were added for these tables.** The 500ms figure is a PAT
+and PMT limit; DVB's own limits for the SDT, NIT and EIT come from a different
+standard (TS 101 211) and are different numbers. Asserting one against the other
+would manufacture breaches.
+
+#### A section-assembly bug this phase uncovered
+
+`dvb.ts` is the first fixture whose tables are large enough to span packets, so
+it is the first to put a **non-zero pointer field** in front of a section. Two
+bugs in `SectionAssembler` had been invisible until then, because every earlier
+fixture's tables fit in one packet each and the pointer was always zero:
+
+- **Joining a PID mid-section fabricated a table.** The bytes before the pointer
+  belong to a section whose start was never seen. They were handed to the same
+  path that begins a section, which read the first as a table id and the next two
+  as a length and assembled a table out of the middle of another one. A long
+  section's CRC rejected it — but the rejection was *counted*, so merely joining
+  a live stream could report a CRC error and clear `isHealthy()`. A short section
+  carries no CRC at all, and SCTE-35 splice sections are short, so there the
+  invented section was emitted as real.
+- **A section whose length field straddled a packet boundary got the wrong
+  length.** The first one or two bytes were buffered correctly and then the
+  length was read from the *next* packet's bytes, which are that section's fourth
+  and fifth. The number that came out was whatever sat in the middle of the
+  table.
+
+Both are fixed, both are covered by tests in `SectionAssemblerTest`, and the
+fixes are mutation-checked. Neither is specific to DVB — the first affects any
+PSI PID joined mid-section, which is what a live stream always is.
 
 ### SCTE-35: scope, and why it is its own module
 
@@ -437,9 +628,11 @@ Roughly in order, each piece useful on its own:
 1. **Find the PIDs.** Streams the PMT declares as type `0x86` — **done**.
    `StreamType.SCTE35` already existed, so Grind labelled these tracks before
    this module was written. A conforming PMT also
-   carries a `CUEI` registration descriptor; descriptor parsing is phase 3, so
-   stream type alone is the starting point and the descriptor is a later
-   confirmation rather than a precondition.
+   carries a `CUEI` registration descriptor, which phase 3 now reads —
+   `ProgramMapTable.registrationIdentifier()`. It stays a *confirmation* rather
+   than a precondition, deliberately: a stream that declares type `0x86` without
+   the descriptor is non-conforming and still carries splice information, and
+   requiring the descriptor would mean ignoring cues that are plainly there.
 2. **Assemble the sections** — **done**, and it needed a change in
    `grind-core`. Splice sections are *short form*, and the assembler discarded
    short sections outright: "None of the tables this library reads use them."
@@ -576,6 +769,8 @@ fixtures, each there because the others cannot show something:
 | `multiprogram.ts` | two programs, two PMTs on separate PIDs, four tracks |
 | `splice.ts` | SCTE-35 ad markers, both signalling styles |
 | `cropped.ts` | a height that is not a whole number of macroblocks, so the picture is cropped |
+| `dvb.ts` | the DVB tables: SDT with two named services, NIT, EIT p/f split across its two sections, language descriptors on two audio tracks |
+| `sdt-6937.bin` | one SDT section whose strings TSDuck encoded in ISO 6937 and ISO 8859-15 |
 | `sample.h264`, `bframes.h264` | the same elementary streams as ffmpeg extracts them |
 
 Expectations are cross-checked against what `ffprobe` and TSDuck independently
@@ -586,6 +781,30 @@ one is available: `ffmpeg -c:v copy -f h264` extracts the same elementary stream
 and what the assembler produces is compared against it **byte for byte**. Both
 fixtures match exactly. That is not a sample of the behaviour, it is all of it —
 and ffmpeg has no reason to share this implementation's mistakes.
+
+`dvb.ts` is built by [`fixtures/make-dvb-ts.sh`](fixtures/make-dvb-ts.sh), and is
+the other fixture ffmpeg cannot produce alone: it writes the SDT, the NIT and the
+language descriptors, but has no EIT at all, so TSDuck compiles
+`fixtures/eit-pf.xml` and injects it. Three things about that are not obvious and
+are written into the script. Injection *replaces* null packets rather than
+inserting, so a source with no stuffing silently gets nothing — which is why the
+script checks the output actually contains an EIT rather than trusting `tsp`'s
+exit code, after an earlier version cheerfully produced a fixture with no EIT in
+it. `--inter-packet` rather than `--replace`, since nothing carries PID 18 until
+this step creates it. And `--eit-normalization`, which splits present and
+following into the two sections TS 101 211 requires: without it TSDuck writes
+both events into one section, and a parser that kept only the last section to
+arrive would pass every test here and then report next week's film as what is on
+now against a real broadcaster.
+
+`sdt-6937.bin` is a bare section rather than a stream, built by
+[`fixtures/make-sdt-6937.sh`](fixtures/make-sdt-6937.sh). What it is for is the
+string decoder, and what that needs is bytes a real encoder chose — not a
+multiplex. ffmpeg only ever writes UTF-8 with a 0x15 selector, so `dvb.ts` covers
+that path and no other; TSDuck encodes the same names the way broadcast equipment
+does, which turns out to be two different ways inside one descriptor. Wrapping it
+in a transport stream would have meant either a second SDT fighting the muxer's
+own on PID 0x11, or a quarter-megabyte fixture to carry sixty-eight bytes.
 
 The first three are one `ffmpeg` command each. `splice.ts` is not, because
 ffmpeg cannot produce SCTE-35 at all — it knows the stream type well enough to

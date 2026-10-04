@@ -52,6 +52,14 @@ import java.util.List;
  * @param crcErrors        PSI sections discarded for a bad checksum. TR 101 290
  *                         <b>CRC_error</b>, Priority 2 — worse than loss on a video PID,
  *                         because it can leave the stream's structure unknown
+ * @param dvbCrcErrors     DVB sections — SDT, NIT, EIT — discarded for a bad checksum,
+ *                         counted apart from {@code crcErrors} and deliberately kept out
+ *                         of {@link #isHealthy()} and of errored seconds. Losing one of
+ *                         these costs a name or a programme description, not the stream:
+ *                         every PID stays findable and every frame stays decodable. The
+ *                         EIT is also the largest table on a broadcast multiplex and takes
+ *                         loss as a matter of course, so counting it as damage would report
+ *                         working streams as broken for most of their duration
  * @param pcrRepetitionErrors intervals between consecutive PCRs longer than TR 101 290's
  *                         40ms, summed across every PID carrying one. <b>Priority 2
  *                         PCR_repetition_error.</b> Counted but deliberately kept out of
@@ -101,6 +109,7 @@ public record TsStreamStats(
         long pesPackets,
         long syncLosses,
         long crcErrors,
+        long dvbCrcErrors,
         long pcrDiscontinuities,
         long pcrRepetitionErrors,
         long ptsErrors,
@@ -155,6 +164,11 @@ public record TsStreamStats(
      * loss, that loss already shows here as continuity errors, counted at the
      * point it happened. Including the gap as well would report one fault twice,
      * and would also flag a merely slow muxer as a damaged stream.
+     *
+     * <p>{@code dvbCrcErrors} is excluded on the first principle rather than the
+     * second: a corrupt SDT or EIT section really was lost, but what it cost was
+     * a name. {@code crcErrors} stays in because a corrupt PAT or PMT can leave
+     * the stream's structure unknown, which is a different kind of loss.
      */
     public boolean isHealthy() {
         return continuityErrors == 0 && transportErrors == 0 && syncLosses == 0

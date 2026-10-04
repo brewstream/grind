@@ -61,6 +61,30 @@ public final class TsPacket {
     /** The PID carrying the Program Association Table, fixed by the spec. */
     public static final int PAT_PID = 0x0000;
 
+    /**
+     * The PID carrying the Network Information Table, fixed by ETSI EN 300 468
+     * §5.1.3.
+     *
+     * <p>DVB rather than base MPEG-TS, and absent from most contribution feeds.
+     * The base standard reserves this PID for the NIT but leaves what is on it
+     * to the network's own definition; DVB is what fixes it.
+     */
+    public static final int NIT_PID = 0x0010;
+
+    /**
+     * The PID carrying the Service Description Table, and the Bouquet
+     * Association Table alongside it. Which is which is decided by table id, not
+     * by PID.
+     */
+    public static final int SDT_PID = 0x0011;
+
+    /**
+     * The PID carrying the Event Information Table, present/following and
+     * schedule together. On a broadcast multiplex this is usually the largest
+     * non-media PID in the stream, nearly all of it schedule.
+     */
+    public static final int EIT_PID = 0x0012;
+
     private static final byte[] NO_DATA = new byte[0];
 
     private final byte[] data;

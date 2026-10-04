@@ -207,6 +207,77 @@ class SectionAssemblerTest {
         assertThat(assembler.crcFailures()).as("discarded, not miscounted as corruption").isZero();
     }
 
+    /**
+     * Joining a PID on a packet that starts a section: the bytes before the
+     * pointer belong to a section whose start was never seen.
+     *
+     * <p>The sibling of {@link #continuationBytesWithNothingInProgressAreDiscarded},
+     * and the case that was wrong. Those bytes used to be handed to the same
+     * path that starts a section, which read the first of them as a table id and
+     * the next two as a length and produced a table assembled from the middle of
+     * another one. Here the tail is the body of a real section, so its bytes are
+     * the plausible-looking kind rather than obvious rubbish.
+     *
+     * <p>What made it invisible: every fixture that predates {@code dvb.ts} has
+     * tables small enough that each packet begins a section, so the pointer is
+     * always zero and this branch never ran.
+     */
+    @Test
+    void aTailBeforeThePointerIsDiscardedWhenNothingIsInProgress() {
+        byte[] first = section(TABLE_ID, 5, 300);
+        byte[] second = section(TABLE_ID, 6, 20);
+
+        // The tail of a section we never saw the start of, then a whole one.
+        byte[] tail = Arrays.copyOfRange(first, 250, first.length);
+        byte[] payload = new byte[tail.length + second.length];
+        System.arraycopy(tail, 0, payload, 0, tail.length);
+        System.arraycopy(second, 0, payload, tail.length, second.length);
+
+        SectionAssembler assembler = new SectionAssembler();
+        List<TableSection> sections =
+                feed(assembler, packet(0x100, 0, tail.length, payload));
+
+        assertThat(sections)
+                .as("only the section that began here, never one made from the tail")
+                .hasSize(1);
+        assertThat(sections.get(0).tableIdExtension()).isEqualTo(6);
+        assertThat(assembler.crcFailures())
+                .as("joining a stream is not corruption, and must not read as it")
+                .isZero();
+    }
+
+    /**
+     * A section beginning in the last two bytes of a packet is still in
+     * progress, even though its length is not yet known.
+     *
+     * <p>The length lives in the second and third bytes, so until three have
+     * arrived there is a section open with no {@code expectedLength} to show for
+     * it. Anything asking "is a section in progress" by looking at the length
+     * answers no, and throws away the two bytes already held along with the
+     * continuation that completes them.
+     */
+    @Test
+    void aSectionWhoseLengthStraddlesAPacketBoundaryIsStillInProgress() {
+        byte[] first = section(TABLE_ID, 7, 169);
+        byte[] second = section(TABLE_ID, 8, 40);
+        assertThat(first).as("sized so that exactly two bytes of the next one fit")
+                .hasSize(181);
+
+        byte[] payload = new byte[first.length + 2];
+        System.arraycopy(first, 0, payload, 0, first.length);
+        System.arraycopy(second, 0, payload, first.length, 2);
+
+        SectionAssembler assembler = new SectionAssembler();
+        List<TableSection> sections = feed(assembler,
+                packet(0x100, 0, 0, payload),
+                packet(0x100, 1, -1, Arrays.copyOfRange(second, 2, second.length)));
+
+        assertThat(sections).extracting(TableSection::tableIdExtension)
+                .as("both, and the second only if its first two bytes were kept")
+                .containsExactly(7, 8);
+        assertThat(assembler.crcFailures()).isZero();
+    }
+
     @Test
     void aCorruptSectionIsCountedAndDropped() {
         byte[] section = section(TABLE_ID, 6, 20);

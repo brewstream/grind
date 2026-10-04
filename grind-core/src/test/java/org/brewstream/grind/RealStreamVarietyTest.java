@@ -168,16 +168,24 @@ class RealStreamVarietyTest {
         assertThat(second.streams()).extracting(ElementaryStream::pid).containsExactly(0x0102, 0x0103);
     }
 
-    /** A PID must be attributed to the right program, not merely to some program. */
+    /**
+     * A PID must be attributed to the right program, not merely to some program.
+     *
+     * <p>The two programs here are named separately in the SDT — {@code tstables}
+     * reports service 1 as "First" and service 2 as "Second" — so this also
+     * pins the join to the <em>right</em> service. A lookup that ignored the
+     * service id and took whichever service came first would name all four PIDs
+     * "First" and still attribute them to the correct program.
+     */
     @Test
     void pidsAreDescribedAgainstTheProgramTheyActuallyBelongTo() throws IOException {
         ProgramMap programs = analyze("/multiprogram.ts").programs();
 
-        assertThat(programs.describe(0x0100)).isEqualTo("program 1 H.264 / AVC");
-        assertThat(programs.describe(0x0101)).isEqualTo("program 1 AAC (ADTS)");
-        assertThat(programs.describe(0x0102)).isEqualTo("program 2 H.264 / AVC");
-        assertThat(programs.describe(0x0103)).isEqualTo("program 2 AAC (ADTS)");
-        assertThat(programs.describe(0x1001)).isEqualTo("PMT for program 2");
+        assertThat(programs.describe(0x0100)).isEqualTo("First H.264 / AVC");
+        assertThat(programs.describe(0x0101)).isEqualTo("First AAC (ADTS)");
+        assertThat(programs.describe(0x0102)).isEqualTo("Second H.264 / AVC");
+        assertThat(programs.describe(0x0103)).isEqualTo("Second AAC (ADTS)");
+        assertThat(programs.describe(0x1001)).isEqualTo("PMT for Second");
         assertThat(programs.allStreams()).hasSize(4);
     }
 

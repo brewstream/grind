@@ -57,6 +57,18 @@ public final class MediaFragment {
      * @throws IllegalArgumentException if there are no samples
      */
     public static byte[] of(int trackId, int sequence, List<Sample> samples) {
+        return of(trackId, sequence, samples, 0);
+    }
+
+    /**
+     * Builds a fragment with an explicit duration for every sample, in track ticks.
+     * Use 1024 for AAC-LC with the audio sample rate as timescale. Zero retains
+     * the video path's timestamp-derived durations.
+     */
+    public static byte[] of(int trackId, int sequence, List<Sample> samples, int sampleDuration) {
+        if (sampleDuration < 0) {
+            throw new IllegalArgumentException("sample duration must not be negative");
+        }
         if (samples.isEmpty()) {
             throw new IllegalArgumentException("a fragment must carry at least one sample");
         }
@@ -65,8 +77,8 @@ public final class MediaFragment {
         // moof's length - which depends on nothing else here. Built once to
         // measure, then again with the answer, rather than reserving space and
         // patching it afterwards.
-        int provisional = moof(trackId, sequence, samples, 0).length;
-        byte[] moof = moof(trackId, sequence, samples, provisional + 8);
+        int provisional = moof(trackId, sequence, samples, 0, sampleDuration).length;
+        byte[] moof = moof(trackId, sequence, samples, provisional + 8, sampleDuration);
 
         int payload = 0;
         for (Sample sample : samples) {
@@ -82,7 +94,8 @@ public final class MediaFragment {
         return out.toByteArray();
     }
 
-    private static byte[] moof(int trackId, int sequence, List<Sample> samples, int dataOffset) {
+    private static byte[] moof(int trackId, int sequence, List<Sample> samples, int dataOffset,
+                               int sampleDuration) {
         BoxWriter out = new BoxWriter();
         out.box("moof", moof -> {
             moof.fullBox("mfhd", 0, 0, mfhd -> mfhd.u32(sequence));
@@ -104,7 +117,7 @@ public final class MediaFragment {
                     trun.s32(dataOffset);
                     for (int i = 0; i < samples.size(); i++) {
                         Sample sample = samples.get(i);
-                        trun.u32(durationOf(samples, i));
+                        trun.u32(sampleDuration > 0 ? sampleDuration : durationOf(samples, i));
                         trun.u32(sample.data().length);
                         trun.u32(sample.flags());
                         trun.s32(sample.compositionOffset());
