@@ -154,6 +154,46 @@ alignment when a stream does not start on a sync byte, requiring `0x47` to recur
 at the packet stride before trusting it — a lone `0x47` inside compressed video
 is an ordinary byte, and a naive scan locks onto noise.
 
+## Keyframes, for thumbnails without a decoder
+
+`KeyframeExtractor` keeps the latest **self-contained keyframe** of a stream's
+video: its parameter sets plus one complete IDR picture, in Annex B form, with the
+RFC 6381 codec string a decoder needs. Nothing is decoded here. A browser decodes
+the one frame with WebCodecs, which is how a relay shows a thumbnail without a
+video decoder in the JVM.
+
+```java
+KeyframeExtractor keyframes = new KeyframeExtractor();
+analyzer.addListener(new TsStreamListener() {
+    @Override
+    public void onProgramsChanged(ProgramMap programs) {
+        keyframes.programsChanged(programs);   // finds the H.264 or HEVC track
+    }
+});
+keyframes.enable();                            // off by default, and free while off
+// for each packet: analyzer.consume(packet); keyframes.consume(packet);
+
+keyframes.latest().ifPresent(k -> send(k.codec(), k.data()));   // "avc1.64000c", Annex B bytes
+```
+
+It works because MPEG-TS carries the parameter sets in-band and repeats them
+before every IDR, so parameter sets plus one IDR decode with no other context.
+That was measured on ffmpeg's H.264 and HEVC output before this was written, and
+`KeyframeInteropTest` checks that each extracted keyframe decodes alone in ffmpeg
+to exactly one frame, without errors.
+
+- **H.264 and HEVC.** IDR is NAL type 5 for H.264, and 19, 20 or 21 for HEVC (CRA
+  included: decoded alone, its leading pictures are simply skipped).
+- **Codec strings:** `avc1.PPCCLL`, and `hev1.A.B.C.D` per RFC 6381 §E.4 with the
+  compatibility flags bit-reversed. `hev1`, not `hvc1`, because the parameter
+  sets are in-band. Checked against ffmpeg's own codec strings for four fixtures,
+  covering Baseline constraint flags and Main 10's compatibility bit.
+- **A unit missing packets is dropped, never kept torn**, through
+  `AccessUnitAssembler`.
+- **Capped at 2 MB.** A larger IDR is skipped and counted.
+- **AV1 is out of scope.** Its sequence header is a different kind of thing and
+  can be added later.
+
 ## Reading a stream
 
 ```java
