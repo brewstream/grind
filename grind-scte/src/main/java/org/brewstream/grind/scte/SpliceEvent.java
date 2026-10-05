@@ -36,8 +36,19 @@ import org.brewstream.grind.AdaptationField;
  * @param sequence   position in the order received, from 1. Sections are commonly
  *                   sent more than once for redundancy, so this distinguishes two
  *                   copies of one event
+ * @param arrivalVideoPts the latest video PTS in this PID's program when it arrived, in
+ *                   90 kHz units, or -1 if the program had no video PTS yet
  */
-public record SpliceEvent(int pid, SpliceInfoSection section, long arrivalPcr, long sequence) {
+public record SpliceEvent(int pid, SpliceInfoSection section, long arrivalPcr, long sequence,
+        long arrivalVideoPts) {
+
+    private static final long TIMESTAMP_MASK = (1L << 33) - 1;
+    private static final long HALF_RANGE = 1L << 32;
+
+    /** An event with no video PTS known; its pre-roll is measured against the PCR. */
+    public SpliceEvent(int pid, SpliceInfoSection section, long arrivalPcr, long sequence) {
+        this(pid, section, arrivalPcr, sequence, -1);
+    }
 
     /** When it arrived, in seconds of stream time, or -1 if the clock was not yet running. */
     public double arrivalSeconds() {
@@ -50,20 +61,51 @@ public record SpliceEvent(int pid, SpliceInfoSection section, long arrivalPcr, l
     }
 
     /**
-     * How long the warning gave, in seconds — the gap between arrival and the
-     * splice point.
+     * How long the warning gave, in seconds: from arrival to the splice point.
+     *
+     * <p>Measured against the latest video PTS in this PID's program when the
+     * section arrived ({@link PreRollBasis#VIDEO_PTS}). That is the warning equipment
+     * acting on frames as they arrive gets, and it is what TSDuck's
+     * {@code splicemonitor} reports. With no video PTS yet, or no video, it falls back
+     * to the program clock ({@link PreRollBasis#PCR}), which runs behind the video
+     * PTS by the mux delay and so gives a longer figure. {@link #preRollBasis()} says
+     * which. Both clocks wrap at 2^33 ticks of 90 kHz, and the difference is taken
+     * across a wrap.
      *
      * <p>Negative means the section arrived after the moment it describes, which
      * is worth surfacing rather than clamping: it means whatever was meant to act
      * on it could not have.
      *
-     * @return the pre-roll, or -1 when either time is unknown
+     * @return the pre-roll, or -1 when the section names no time or no clock was known
      */
     public double preRollSeconds() {
-        if (arrivalPcr < 0 || section.spliceTime() < 0) {
+        long reference = reference();
+        if (reference < 0 || section.spliceTime() < 0) {
             return -1;
         }
-        return spliceSeconds() - arrivalSeconds();
+        return (double) ticksFrom(reference, section.spliceTime()) / SpliceInfoSection.TIMESTAMP_RATE_HZ;
+    }
+
+    /** Which clock {@link #preRollSeconds()} was measured against. */
+    public PreRollBasis preRollBasis() {
+        if (section.spliceTime() < 0 || reference() < 0) {
+            return PreRollBasis.NONE;
+        }
+        return arrivalVideoPts >= 0 ? PreRollBasis.VIDEO_PTS : PreRollBasis.PCR;
+    }
+
+    /** The arrival time in 90 kHz units on the chosen clock, or -1. */
+    private long reference() {
+        if (arrivalVideoPts >= 0) {
+            return arrivalVideoPts;
+        }
+        return arrivalPcr < 0 ? -1 : (arrivalPcr / 300) & TIMESTAMP_MASK;
+    }
+
+    /** {@code to - from} on a 33-bit clock, as the shorter way round: negative if {@code to} is behind. */
+    private static long ticksFrom(long from, long to) {
+        long ahead = (to - from) & TIMESTAMP_MASK;
+        return ahead >= HALF_RANGE ? ahead - (1L << 33) : ahead;
     }
 
     /** A one-line description, the way a dashboard row would read. */

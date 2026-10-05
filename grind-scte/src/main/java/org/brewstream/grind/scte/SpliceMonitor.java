@@ -16,7 +16,10 @@
 
 package org.brewstream.grind.scte;
 
+import org.brewstream.grind.ElementaryStream;
+import org.brewstream.grind.PesHeader;
 import org.brewstream.grind.ProgramMap;
+import org.brewstream.grind.ProgramMapTable;
 import org.brewstream.grind.SectionAssembler;
 import org.brewstream.grind.StreamType;
 import org.brewstream.grind.TableSection;
@@ -46,9 +49,17 @@ import java.util.function.Consumer;
 public final class SpliceMonitor {
 
     private final Map<Integer, SectionAssembler> assemblers = new LinkedHashMap<>();
+    private final byte[] payload = new byte[TsPacket.LENGTH];
     private final List<Consumer<SpliceEvent>> listeners = new ArrayList<>();
 
     private ProgramMap programs = ProgramMap.EMPTY;
+    // Derived from the program map, so a packet is classified without allocating:
+    // splice PIDs, the video PID of each one's program (index into videoPids, or -1),
+    // and the latest PTS seen on each video PID.
+    private int[] splicePids = new int[0];
+    private int[] spliceVideo = new int[0];
+    private int[] videoPids = new int[0];
+    private long[] videoPts = new long[0];
     private long lastPcr = -1;
     private long sequence;
     private long sectionsRead;
@@ -62,7 +73,39 @@ public final class SpliceMonitor {
      * {@code analyzer.stats().programs()} and the splice PIDs follow from it.
      */
     public void programs(ProgramMap programs) {
-        this.programs = programs == null ? ProgramMap.EMPTY : programs;
+        ProgramMap next = programs == null ? ProgramMap.EMPTY : programs;
+        if (next.equals(this.programs)) {
+            return;
+        }
+        this.programs = next;
+        List<Integer> splice = new ArrayList<>();
+        List<Integer> spliceVideoPid = new ArrayList<>();
+        List<Integer> video = new ArrayList<>();
+        for (ProgramMapTable table : next.programs().values()) {
+            int videoPid = table.streams().stream()
+                    .filter(stream -> stream.streamType().kind() == StreamType.Kind.VIDEO)
+                    .mapToInt(ElementaryStream::pid)
+                    .findFirst()
+                    .orElse(-1);
+            for (ElementaryStream stream : table.streams()) {
+                if (stream.streamType() == StreamType.SCTE35) {
+                    splice.add(stream.pid());
+                    spliceVideoPid.add(videoPid);
+                    if (videoPid >= 0 && !video.contains(videoPid)) {
+                        video.add(videoPid);
+                    }
+                }
+            }
+        }
+        long[] pts = new long[video.size()];
+        for (int i = 0; i < pts.length; i++) {
+            int previous = indexOf(videoPids, video.get(i));
+            pts[i] = previous < 0 ? -1 : videoPts[previous];
+        }
+        splicePids = splice.stream().mapToInt(Integer::intValue).toArray();
+        spliceVideo = spliceVideoPid.stream().mapToInt(pid -> pid < 0 ? -1 : video.indexOf(pid)).toArray();
+        videoPids = video.stream().mapToInt(Integer::intValue).toArray();
+        videoPts = pts;
     }
 
     /** Registers a listener, called synchronously as each section is read. */
@@ -86,9 +129,16 @@ public final class SpliceMonitor {
         if (packet.pcr() >= 0) {
             lastPcr = packet.pcr();
         }
-        if (!isSplicePid(packet.pid())) {
+        int video = indexOf(videoPids, packet.pid());
+        if (video >= 0) {
+            trackPts(packet, video);
             return null;
         }
+        int splice = indexOf(splicePids, packet.pid());
+        if (splice < 0) {
+            return null;
+        }
+        long arrivalVideoPts = spliceVideo[splice] < 0 ? -1 : videoPts[spliceVideo[splice]];
 
         SectionAssembler assembler = assemblers.computeIfAbsent(packet.pid(), pid -> new SectionAssembler());
         SpliceEvent last = null;
@@ -101,7 +151,7 @@ public final class SpliceMonitor {
                 continue;
             }
             sectionsRead++;
-            last = new SpliceEvent(packet.pid(), parsed, lastPcr, ++sequence);
+            last = new SpliceEvent(packet.pid(), parsed, lastPcr, ++sequence, arrivalVideoPts);
             for (Consumer<SpliceEvent> listener : listeners) {
                 listener.accept(last);
             }
@@ -109,17 +159,34 @@ public final class SpliceMonitor {
         return last;
     }
 
-    private boolean isSplicePid(int pid) {
-        return programs.allStreams().stream()
-                .anyMatch(stream -> stream.pid() == pid && stream.streamType() == StreamType.SCTE35);
+    /**
+     * Notes the PTS a video PES starts with. In transmission order, so with B-frames
+     * it steps back and forth by a frame or two; that is what "the latest PTS" means,
+     * and it is what TSDuck measures against too.
+     */
+    private void trackPts(TsPacket packet, int video) {
+        if (!packet.payloadUnitStart() || !packet.hasPayload()) {
+            return;
+        }
+        int length = packet.payloadInto(payload, 0);
+        PesHeader header = PesHeader.parse(payload, 0, length);
+        if (header != null && header.hasPts()) {
+            videoPts[video] = header.pts();
+        }
+    }
+
+    private static int indexOf(int[] pids, int pid) {
+        for (int i = 0; i < pids.length; i++) {
+            if (pids[i] == pid) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** Splice PIDs the tables declare, which may legitimately be carrying nothing. */
     public List<Integer> splicePids() {
-        return programs.allStreams().stream()
-                .filter(stream -> stream.streamType() == StreamType.SCTE35)
-                .map(stream -> stream.pid())
-                .toList();
+        return java.util.Arrays.stream(splicePids).boxed().toList();
     }
 
     /** Sections read successfully. */
