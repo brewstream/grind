@@ -655,7 +655,13 @@ Roughly in order, each piece useful on its own:
    would otherwise be read as if its fields lined up.
 6. **The event view** — **done**. `SpliceEvent` carries both times and derives
    the pre-roll between them, which reads negative when a warning arrived too
-   late to act on.
+   late to act on. Pre-roll is measured against the latest video PTS in the
+   splice PID's program, as TSDuck's `splicemonitor` does, because that is the
+   warning equipment acting on frames as they arrive gets. Against the PCR the
+   figure is longer by the mux delay (2.456 s against 1.720 s for the first cue
+   in `splice.ts`), and would report a cue as timely when an encoder had less
+   time than that. Without video it falls back to the PCR, and
+   `preRollBasis()` says which clock was used.
 
 #### Three things that are easy to get wrong
 

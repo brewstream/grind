@@ -16,6 +16,7 @@
 
 package org.brewstream.grind.scte;
 
+import org.brewstream.grind.ProgramMap;
 import org.brewstream.grind.TsAnalyzer;
 import org.brewstream.grind.TsPacket;
 import org.junit.jupiter.api.Test;
@@ -194,10 +195,108 @@ class SpliceMonitorTest {
                     .isGreaterThan(event.arrivalSeconds());
         });
 
-        double firstPreRoll = events.get(0).preRollSeconds();
-        assertThat(firstPreRoll)
-                .as("TSDuck measured about 1.7s of pre-roll on the first copy")
-                .isBetween(1.0, 2.5);
+    }
+
+    /**
+     * Pre-roll is measured against the latest video PTS, as TSDuck's {@code splicemonitor}
+     * does: its "time to event" for every copy that carries an event id, in arrival order
+     * (the two bare {@code time_signal}s carry none and TSDuck does not list them). Within
+     * one frame, 40 ms at 25 fps: with B-frames the latest PTS steps by a frame either way.
+     */
+    @Test
+    void preRollMatchesWhatTsduckMeasured() throws IOException {
+        double[] tsduck = {1.714, 0.794, 1.789, 1.114, 1.714, 1.974, 1.114, 1.174};
+        List<SpliceEvent> events = eventsOf("/splice.ts");
+
+        assertThat(events).allSatisfy(event ->
+                assertThat(event.preRollBasis()).isEqualTo(PreRollBasis.VIDEO_PTS));
+        List<SpliceEvent> withIds = events.stream()
+                .filter(event -> event.section().spliceInsert() != null || event.section().segmentation() != null)
+                .toList();
+        assertThat(withIds).hasSize(tsduck.length);
+        for (int i = 0; i < tsduck.length; i++) {
+            assertThat(withIds.get(i).preRollSeconds()).as("%s, copy %d", withIds.get(i).describe(), i)
+                    .isCloseTo(tsduck[i], within(0.040));
+        }
+    }
+
+    /**
+     * With no video in the program, pre-roll falls back to the PCR. {@code splice-audio.ts}
+     * carries event 1001 out twice; 403,200 / 90 kHz minus the PCR at arrival is 2.651122 s
+     * and 1.147122 s, computed from the raw packets outside Grind.
+     */
+    @Test
+    void fallsBackToThePcrWithoutVideo() throws IOException {
+        List<SpliceEvent> events = eventsOf("/splice-audio.ts");
+
+        assertThat(events).hasSize(2).allSatisfy(event -> {
+            assertThat(event.arrivalVideoPts()).isEqualTo(-1);
+            assertThat(event.preRollBasis()).isEqualTo(PreRollBasis.PCR);
+        });
+        assertThat(events.get(0).preRollSeconds()).isCloseTo(2.651_122, within(0.000_01));
+        assertThat(events.get(1).preRollSeconds()).isCloseTo(1.147_122, within(0.000_01));
+    }
+
+    /**
+     * A program map that changes without touching the video track, as when the SDT
+     * arrives, keeps the video PTS already seen: a cue right after it is still measured
+     * against video.
+     */
+    @Test
+    void keepsTheVideoPtsAcrossAMapChange() throws IOException {
+        byte[] data;
+        try (InputStream in = SpliceMonitorTest.class.getResourceAsStream("/splice.ts")) {
+            data = in.readAllBytes();
+        }
+        TsAnalyzer analyzer = new TsAnalyzer();
+        SpliceMonitor monitor = new SpliceMonitor();
+        List<SpliceEvent> events = new ArrayList<>();
+        monitor.addListener(events::add);
+        for (int offset = 0; offset + TsPacket.LENGTH <= data.length && events.isEmpty(); offset += TsPacket.LENGTH) {
+            TsPacket packet = TsPacket.parse(data, offset);
+            analyzer.consume(packet);
+            ProgramMap map = analyzer.stats().programs();
+            monitor.programs(map);
+            if (packet.pid() == SPLICE_PID) {
+                // The same tracks under a different transport stream id: a change the
+                // video track is not part of.
+                monitor.programs(new ProgramMap(map.transportStreamId() + 1, map.programs(), map.pmtPids(),
+                        map.services(), map.network()));
+            }
+            monitor.consume(packet);
+        }
+
+        assertThat(events).isNotEmpty();
+        assertThat(events.getFirst().preRollBasis()).isEqualTo(PreRollBasis.VIDEO_PTS);
+    }
+
+    /** Both clocks wrap at 2^33; the pre-roll is the short way round, either direction. */
+    @Test
+    void preRollIsTakenAcrossATimestampWrap() {
+        long wrap = 1L << 33;
+        SpliceEvent ahead = new SpliceEvent(SPLICE_PID, timeSignal(900), -1, 1, wrap - 90_000);
+        assertThat(ahead.preRollSeconds()).as("1 s before the wrap, splice 10 ms after it").isCloseTo(1.01, within(1e-9));
+
+        SpliceEvent late = new SpliceEvent(SPLICE_PID, timeSignal(wrap - 900), -1, 2, 900);
+        assertThat(late.preRollSeconds()).as("arrived 20 ms after its splice").isCloseTo(-0.02, within(1e-9));
+
+        SpliceEvent byPcr = new SpliceEvent(SPLICE_PID, timeSignal(900), (wrap - 90_000) * 300, 3);
+        assertThat(byPcr.preRollBasis()).isEqualTo(PreRollBasis.PCR);
+        assertThat(byPcr.preRollSeconds()).isCloseTo(1.01, within(1e-9));
+    }
+
+    @Test
+    void noTimeMeansNoPreRoll() {
+        SpliceEvent untimed = new SpliceEvent(SPLICE_PID, timeSignal(-1), 27_000_000, 1, 90_000);
+        assertThat(untimed.preRollSeconds()).isEqualTo(-1);
+        assertThat(untimed.preRollBasis()).isEqualTo(PreRollBasis.NONE);
+
+        SpliceEvent noClock = new SpliceEvent(SPLICE_PID, timeSignal(900), -1, 2);
+        assertThat(noClock.preRollBasis()).isEqualTo(PreRollBasis.NONE);
+    }
+
+    private static SpliceInfoSection timeSignal(long pts) {
+        return new SpliceInfoSection(SpliceCommandType.TIME_SIGNAL, 0, 0xFFF, false, null, pts, List.of());
     }
 
     /** Duplicates are distinguishable, since each event is sent twice. */
